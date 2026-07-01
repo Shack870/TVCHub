@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Firm staff only. Tokenized download URLs minted by the ingest function
+    // still work without auth; this governs direct SDK access.
+    function firmUser() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email.matches('(?i).*@(ironrocklaw|goironrock)[.]com$');
+    }
+    match /referrals/{allPaths=**} {
+      allow read, write: if firmUser();
+    }
+  }
+}

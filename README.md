@@ -20,9 +20,13 @@ tool is laser-focused on intake and sales.
 
 | Phase | What | Status |
 | ----- | ---- | ------ |
-| 1 | Notepad UI + full lead lifecycle on real Firestore. Payments **simulated**, retainer is a checkbox. Leads added manually or by pasting a TVC email. | ✅ |
-| 2 | Gmail auto-ingestion (Cloud Functions + Pub/Sub) — TVC emails become lead cards automatically; PDFs saved to Storage. | ✅ (deploy + config to go live) |
-| 3 | Square payments (keyed card-not-present + payment link) behind the `PaymentProvider` interface. | ✅ (set `VITE_PAYMENTS=square` + secrets to go live) |
+| 1 | Notepad UI + full lead lifecycle on real Firestore. Leads added manually, by pasting a TVC email, or by uploading the referral PDF (AI extraction). | ✅ |
+| 2 | Gmail auto-ingestion via an Apps Script bridge — TVC emails become lead cards automatically; attachments saved to Storage. | ✅ (deploy + config to go live) |
+
+Payments are **not** processed in-app. The firm takes payment on its own
+terminal (or by cash/check) and records the amount + method here so the
+financing tracker and reporting stay accurate. There is intentionally no Square
+or other gateway integration.
 
 ## Local Development
 
@@ -49,44 +53,40 @@ npm run build
 firebase deploy --only firestore:rules,storage,hosting
 ```
 
-## Phase 2 — Gmail Ingestion
+## Phase 2 — Gmail Ingestion (Apps Script bridge)
 
-The pieces live in `functions/`:
+A small Google Apps Script runs inside the intake mailbox, polls for new TVC
+referral emails, and POSTs each one to the `ingestEmail` Cloud Function. The
+function extracts the fields (LLM, with a regex fallback), saves any attachments
+to Storage with tokenized download URLs, dedupes by message id / TVC case
+number, and drops a new card on the desk.
 
-- `registerGmailWatch` (callable) — registers a Gmail push watch on the inbox.
-- `renewGmailWatch` (scheduled daily) — Gmail watches expire ~7 days.
-- `onGmailNotification` (Pub/Sub) — fetches new messages, parses TVC referrals
-  (`functions/src/parser.ts`), saves PDF attachments to Storage, creates leads.
+The pieces:
+
+- `functions/src/ingest.ts` — the `ingestEmail` HTTP endpoint.
+- `functions/src/extract.ts` — the `extractPdf` callable used by the in-app
+  "Upload PDF" flow.
+- `functions/src/llm.ts` — OpenAI extraction (shared by both).
+- `functions/src/parser.ts` — regex parser / fallback.
+- `apps-script/Code.gs` — the mailbox bridge (full setup steps in its header).
 
 Setup:
 
-1. Create a Pub/Sub topic `gmail-incoming` and grant
-   `gmail-api-push@system.gserviceaccount.com` the Publisher role.
-2. Create a service account with **domain-wide delegation** authorized for the
-   `gmail.readonly` scope, able to impersonate the intake inbox.
-3. Configure params/secrets:
-
 ```bash
-firebase functions:secrets:set GMAIL_SA_KEY      # paste the SA JSON key
-firebase deploy --only functions \
-  --set-env-vars GMAIL_USER=intake@yourfirm.com,GMAIL_TOPIC=projects/<id>/topics/gmail-incoming
+firebase functions:secrets:set INGEST_TOKEN    # shared secret with Apps Script
+firebase functions:secrets:set OPENAI_API_KEY
+firebase deploy --only functions
 ```
 
-4. Call `registerGmailWatch` once (signed in) to start the watch.
+Then follow the SETUP comment at the top of `apps-script/Code.gs` (set
+`FUNCTION_URL` + `INGEST_TOKEN` script properties, authorize, install the
+trigger). `OPENAI_MODEL` is a non-secret param in `functions/.env`.
 
-## Phase 3 — Square Payments
+## Payments
 
-Default is the **simulated** provider. To go live:
-
-```bash
-firebase functions:secrets:set SQUARE_ACCESS_TOKEN
-firebase deploy --only functions \
-  --set-env-vars SQUARE_LOCATION_ID=<loc>,SQUARE_ENV=sandbox
-```
-
-Then set `VITE_PAYMENTS=square` in `.env.local` and rebuild. Card-not-present
-("keyed") charges require a card token from the Square Web Payments SDK passed as
-`sourceId`; payment links are generated server-side.
+Payments are recorded, not processed. In the Retain panel and the Financing
+modal, enter the amount taken and the method (Card / Cash / Check / Other). No
+external gateway is contacted.
 
 ## Project Layout
 
@@ -94,14 +94,17 @@ Then set `VITE_PAYMENTS=square` in `.env.local` and rebuild. Card-not-present
 src/
   components/        UI: notepad card, drawers, modals, shell, primitives
   pages/             The Desk, Command Center, Retained, Financing
-  lib/               parser, dates, lead flow, actions, payments
+  lib/               parser, dates, lead flow, actions, payments, validation
   store/             Zustand stores (leads, UI) + Firestore subscription
   context/           Auth context
   firebase.ts        Firebase client init (env-driven, boots without config)
 functions/
-  src/parser.ts      TVC referral parser (server copy)
-  src/gmail.ts       Gmail client + attachment handling
-  src/square.ts      Square payment Cloud Functions
-  src/index.ts       Function exports + ingestion pipeline
+  src/ingest.ts      ingestEmail HTTP endpoint (Apps Script bridge)
+  src/extract.ts     extractPdf callable (in-app PDF upload)
+  src/llm.ts         OpenAI extraction
+  src/parser.ts      TVC referral parser / fallback
+  src/index.ts       Function exports
+apps-script/
+  Code.gs            Gmail → ingestEmail bridge
 ```
 # TVCHub

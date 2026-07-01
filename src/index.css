@@ -1,0 +1,152 @@
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Special+Elite&family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #1c2541;
+  /* Original blue-green backdrop. */
+  background: radial-gradient(circle at 30% 20%, #2f3d31 0%, #1c2620 60%, #141b16 100%);
+  background-attachment: fixed;
+}
+
+@layer components {
+  /* A wooden desk surface that frames the pad of paper — sized just slightly
+     larger than its contents (via padding) and floating on the backdrop. */
+  .desk {
+    background-color: #5a3a20;
+    background-image:
+      repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.05) 0px,
+        rgba(0, 0, 0, 0.05) 1px,
+        transparent 1px,
+        transparent 4px
+      ),
+      repeating-linear-gradient(
+        2deg,
+        rgba(255, 255, 255, 0.025) 0px,
+        rgba(255, 255, 255, 0.025) 2px,
+        transparent 2px,
+        transparent 11px
+      ),
+      repeating-linear-gradient(
+        0deg,
+        transparent 0px,
+        transparent 150px,
+        rgba(0, 0, 0, 0.3) 150px,
+        rgba(0, 0, 0, 0.3) 152px,
+        rgba(255, 255, 255, 0.06) 152px,
+        rgba(255, 255, 255, 0.06) 154px,
+        transparent 154px,
+        transparent 158px
+      ),
+      linear-gradient(100deg, #6e4a28 0%, #5e3c21 45%, #6a4626 70%, #523219 100%);
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow:
+      0 24px 55px rgba(0, 0, 0, 0.5),
+      inset 0 0 0 2px rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  /* Ruled legal-pad paper background */
+  .legal-pad {
+    position: relative;
+    background-color: theme('colors.pad.paper');
+    background-image:
+      linear-gradient(theme('colors.pad.line') 1px, transparent 1px);
+    background-size: 100% 28px;
+    background-position: 0 40px;
+  }
+  .legal-pad::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 46px;
+    width: 2px;
+    background: theme('colors.pad.margin');
+    opacity: 0.7;
+  }
+  /* top binding strip */
+  .pad-binding {
+    background: repeating-linear-gradient(
+      90deg,
+      #d8c98f 0 14px,
+      #c9b877 14px 28px
+    );
+  }
+  .ink {
+    color: theme('colors.pad.ink');
+  }
+  .stamp {
+    font-family: 'Special Elite', monospace;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border: 3px solid currentColor;
+    border-radius: 6px;
+    padding: 2px 10px;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-pad-ink text-pad-paper hover:bg-pad-inkSoft;
+  }
+  .btn-danger {
+    @apply btn bg-pad-red text-white hover:opacity-90;
+  }
+  .btn-ghost {
+    @apply btn bg-black/5 text-pad-ink hover:bg-black/10;
+  }
+  .field-label {
+    @apply text-[11px] font-semibold uppercase tracking-wide text-pad-inkSoft/70;
+  }
+  /* Actionable data (tel:/mailto:) — reads like underlined ink, turns red on
+     hover so the operator knows it's a live, clickable line. */
+  .ink-link {
+    @apply font-type text-pad-ink underline decoration-pad-margin/50 decoration-2 underline-offset-2 transition hover:text-pad-red hover:decoration-pad-margin;
+  }
+  /* One-click outcome chips that stamp a result without leaving the desk. */
+  .quick-chip {
+    @apply rounded-md border border-black/10 bg-white/70 px-2 py-1 font-type text-[11px] font-bold uppercase tracking-wide text-pad-ink transition hover:-translate-y-0.5 hover:bg-white active:scale-95 disabled:opacity-40;
+  }
+  /* Tabular, monospaced figures so phones / case #s / money never jiggle. */
+  .data {
+    @apply font-type;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Tiny keycap for the keyboard-hint legend. */
+  .kbd {
+    @apply inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/20 bg-white/10 px-1 font-type text-[10px] font-bold text-manila;
+  }
+  .nav-link {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-manila/80 transition hover:bg-white/10 hover:text-white;
+  }
+  .nav-link-active {
+    @apply bg-white/15 text-white;
+  }
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}

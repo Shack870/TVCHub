@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Only authenticated firm staff. If staff sign in with a different email
+    // domain, update the pattern below (this is the one place to change it).
+    function firmUser() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email.matches('(?i).*@(ironrocklaw|goironrock)[.]com$');
+    }
+
+    // A lead write must keep the core fields the app relies on, and can't grow
+    // unbounded (guards against malformed / abusive documents).
+    function validLead() {
+      let d = request.resource.data;
+      return d.keys().hasAll(['name', 'stage', 'source'])
+        && d.name is string && d.name.size() <= 200
+        && d.stage is string
+        && d.source is string;
+    }
+
+    match /leads/{leadId} {
+      allow read: if firmUser();
+      allow create, update: if firmUser() && validLead();
+      allow delete: if firmUser();
+    }
+
+    match /users/{uid} {
+      allow read: if firmUser();
+      allow write: if firmUser() && request.auth.uid == uid;
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
