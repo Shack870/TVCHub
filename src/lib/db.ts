@@ -99,6 +99,38 @@ export async function updateLead(id: string, patch: Partial<Lead>): Promise<void
   }
 }
 
+// Thrown by a mutateLead mutator when a business rule fails against the FRESH
+// document (e.g. payment exceeds balance). Carries a user-facing message; the
+// caller decides how to surface it, so mutateLead doesn't toast it.
+export class LeadCheckError extends Error {}
+
+// Transactional read-modify-write: reads the CURRENT lead inside a Firestore
+// transaction and applies `mutate` to it, so two users acting on the same lead
+// can never clobber each other's appends (contact attempts, payments,
+// follow-ups). The mutator gets the fresh doc — never a stale UI snapshot —
+// and returns the patch to apply (or null to skip writing).
+export async function mutateLead(
+  id: string,
+  mutate: (fresh: Lead) => Partial<Lead> | null,
+): Promise<void> {
+  try {
+    await runTransaction(db, async (tx) => {
+      const ref = doc(db, LEADS, id);
+      const snap = await tx.get(ref);
+      if (!snap.exists()) throw new Error('This lead no longer exists.');
+      const fresh = { id: snap.id, ...(snap.data() as object) } as Lead;
+      const patch = mutate(fresh);
+      if (!patch) return;
+      tx.update(ref, { ...patch, updatedAt: Date.now() } as Record<string, unknown>);
+    });
+  } catch (e) {
+    if (!(e instanceof LeadCheckError)) {
+      notify.error(`Couldn't save changes — ${errMsg(e)}`);
+    }
+    throw e;
+  }
+}
+
 // Optimistic-concurrency write for free-text field edits: if another user saved
 // a change after this edit began (lead.updatedAt advanced past baseUpdatedAt),
 // abort instead of silently clobbering their work. Returns conflict:true so the

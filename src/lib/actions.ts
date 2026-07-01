@@ -1,4 +1,4 @@
-import { createLead, updateLead } from './db';
+import { createLead, LeadCheckError, mutateLead, updateLead } from './db';
 import { balanceOf, isActiveLead, makeEmptyLead, stageForOutcome, totalFeeOf } from './leadFlow';
 import { advanceMonth, needsCourtDateUpdate } from './dates';
 import { computeFollow, DAY, nextTouch } from './followups';
@@ -30,49 +30,53 @@ export async function applyOutcome(
     followType?: FollowUpType | null;
   } = {},
 ): Promise<void> {
-  const now = Date.now();
-  const attempt: ContactAttempt = {
-    ts: now,
-    outcome,
-    notes: opts.notes,
-    by: opts.by,
-  };
-  const patch: Partial<Lead> = {
-    contactAttempts: [...(lead.contactAttempts ?? []), attempt],
-    stage: stageForOutcome(outcome),
-  };
-  if (outcome === 'spoke' || outcome === 'thinking' || outcome === 'wants_attorney') {
-    patch.pitchDelivered = true;
-  }
-  if (outcome === 'wants_attorney') {
-    // Schedule the attorney call as a real follow-up so it surfaces on the
-    // calendar and the Today queue, not just as a hidden timestamp.
-    const at = opts.followDate
-      ? new Date(opts.followDate + 'T09:00:00').getTime()
-      : now + DAY;
-    patch.attorneyCallAt = at;
-    patch.followUps = [
-      ...(lead.followUps ?? []),
-      { id: uid(), type: 'attorney', dueAt: at, done: false, note: 'Attorney call' },
-    ];
-  } else if (outcome === 'lost') {
-    // Written off: stop the clock and clear any pending follow-ups so it leaves
-    // every active work queue.
-    patch.lostAt = now;
-    patch.lostReason = opts.notes;
-    patch.followUps = (lead.followUps ?? []).map((f) =>
-      f.done ? f : { ...f, done: true, doneAt: now },
-    );
-  } else {
-    const f = computeFollow(outcome, lead.nextCourtDate, opts.followDate, opts.followType ?? null);
-    if (f) {
-      patch.followUps = [
-        ...(lead.followUps ?? []),
-        { id: uid(), type: f.type, dueAt: f.at, done: false, note: f.note },
-      ];
+  // Transactional: builds the patch from the FRESH lead so two reps logging on
+  // the same lead can't drop each other's attempts/follow-ups.
+  await mutateLead(lead.id, (fresh) => {
+    const now = Date.now();
+    const attempt: ContactAttempt = {
+      ts: now,
+      outcome,
+      notes: opts.notes,
+      by: opts.by,
+    };
+    const patch: Partial<Lead> = {
+      contactAttempts: [...(fresh.contactAttempts ?? []), attempt],
+      stage: stageForOutcome(outcome),
+    };
+    if (outcome === 'spoke' || outcome === 'thinking' || outcome === 'wants_attorney') {
+      patch.pitchDelivered = true;
     }
-  }
-  await updateLead(lead.id, patch);
+    if (outcome === 'wants_attorney') {
+      // Schedule the attorney call as a real follow-up so it surfaces on the
+      // calendar and the Today queue, not just as a hidden timestamp.
+      const at = opts.followDate
+        ? new Date(opts.followDate + 'T09:00:00').getTime()
+        : now + DAY;
+      patch.attorneyCallAt = at;
+      patch.followUps = [
+        ...(fresh.followUps ?? []),
+        { id: uid(), type: 'attorney', dueAt: at, done: false, note: 'Attorney call' },
+      ];
+    } else if (outcome === 'lost') {
+      // Written off: stop the clock and clear any pending follow-ups so it leaves
+      // every active work queue.
+      patch.lostAt = now;
+      patch.lostReason = opts.notes;
+      patch.followUps = (fresh.followUps ?? []).map((f) =>
+        f.done ? f : { ...f, done: true, doneAt: now },
+      );
+    } else {
+      const f = computeFollow(outcome, fresh.nextCourtDate, opts.followDate, opts.followType ?? null);
+      if (f) {
+        patch.followUps = [
+          ...(fresh.followUps ?? []),
+          { id: uid(), type: f.type, dueAt: f.at, done: false, note: f.note },
+        ];
+      }
+    }
+    return patch;
+  });
 }
 
 // Flexible call logger for the contact wizard's decision tree: records the
@@ -89,31 +93,33 @@ export async function logCallOutcome(
     touches?: { type: FollowUpType; dueAt: number; note: string }[];
   } = {},
 ): Promise<void> {
-  const now = Date.now();
-  const attempt: ContactAttempt = { ts: now, outcome, notes: opts.notes, by: opts.by };
-  const patch: Partial<Lead> = {
-    contactAttempts: [...(lead.contactAttempts ?? []), attempt],
-    stage: stageForOutcome(outcome),
-  };
-  if (outcome === 'spoke' || outcome === 'thinking' || outcome === 'wants_attorney') {
-    patch.pitchDelivered = true;
-  }
-  if (opts.attorneyCallAt) patch.attorneyCallAt = opts.attorneyCallAt;
-  // Logging this call resolves whatever was already scheduled, so close every
-  // open follow-up before adding the new one(s). This keeps exactly one active
-  // follow-up thread per lead and prevents stale/duplicate calendar reminders.
-  const superseded = (lead.followUps ?? []).map((f) =>
-    f.done ? f : { ...f, done: true, doneAt: now },
-  );
-  const adds: FollowUp[] = (opts.touches ?? []).map((t) => ({
-    id: uid(),
-    type: t.type,
-    dueAt: t.dueAt,
-    done: false,
-    note: t.note,
-  }));
-  patch.followUps = [...superseded, ...adds];
-  await updateLead(lead.id, patch);
+  await mutateLead(lead.id, (fresh) => {
+    const now = Date.now();
+    const attempt: ContactAttempt = { ts: now, outcome, notes: opts.notes, by: opts.by };
+    const patch: Partial<Lead> = {
+      contactAttempts: [...(fresh.contactAttempts ?? []), attempt],
+      stage: stageForOutcome(outcome),
+    };
+    if (outcome === 'spoke' || outcome === 'thinking' || outcome === 'wants_attorney') {
+      patch.pitchDelivered = true;
+    }
+    if (opts.attorneyCallAt) patch.attorneyCallAt = opts.attorneyCallAt;
+    // Logging this call resolves whatever was already scheduled, so close every
+    // open follow-up before adding the new one(s). This keeps exactly one active
+    // follow-up thread per lead and prevents stale/duplicate calendar reminders.
+    const superseded = (fresh.followUps ?? []).map((f) =>
+      f.done ? f : { ...f, done: true, doneAt: now },
+    );
+    const adds: FollowUp[] = (opts.touches ?? []).map((t) => ({
+      id: uid(),
+      type: t.type,
+      dueAt: t.dueAt,
+      done: false,
+      note: t.note,
+    }));
+    patch.followUps = [...superseded, ...adds];
+    return patch;
+  });
 }
 
 // A no-contact attempt (no answer / voicemail) from a work queue: log it and
@@ -124,15 +130,17 @@ export async function logNoContact(
   outcome: 'no_answer' | 'voicemail',
   by?: string,
 ): Promise<void> {
-  const now = Date.now();
-  const attempt: ContactAttempt = { ts: now, outcome, by };
-  const followUps: FollowUp[] = (lead.followUps ?? []).filter(
-    (f) => !(f.type === 'callback' && !f.done),
-  );
-  followUps.push({ id: uid(), type: 'callback', dueAt: now + DAY, done: false, note: 'Call back' });
-  await updateLead(lead.id, {
-    contactAttempts: [...(lead.contactAttempts ?? []), attempt],
-    followUps,
+  await mutateLead(lead.id, (fresh) => {
+    const now = Date.now();
+    const attempt: ContactAttempt = { ts: now, outcome, by };
+    const followUps: FollowUp[] = (fresh.followUps ?? []).filter(
+      (f) => !(f.type === 'callback' && !f.done),
+    );
+    followUps.push({ id: uid(), type: 'callback', dueAt: now + DAY, done: false, note: 'Call back' });
+    return {
+      contactAttempts: [...(fresh.contactAttempts ?? []), attempt],
+      followUps,
+    };
   });
 }
 
@@ -179,22 +187,24 @@ export async function scheduleAttorneyCall(
   lead: Lead,
   whenMs: number,
 ): Promise<void> {
-  // Replace any pending attorney follow-up with one at the new time so the
-  // call shows on the calendar / Today queue and we never leave stale duplicates.
-  const followUps: FollowUp[] = (lead.followUps ?? []).filter(
-    (f) => !(f.type === 'attorney' && !f.done),
-  );
-  followUps.push({
-    id: uid(),
-    type: 'attorney',
-    dueAt: whenMs,
-    done: false,
-    note: 'Attorney call',
-  });
-  await updateLead(lead.id, {
-    stage: 'attorney_call',
-    attorneyCallAt: whenMs,
-    followUps,
+  await mutateLead(lead.id, (fresh) => {
+    // Replace any pending attorney follow-up with one at the new time so the
+    // call shows on the calendar / Today queue and we never leave stale duplicates.
+    const followUps: FollowUp[] = (fresh.followUps ?? []).filter(
+      (f) => !(f.type === 'attorney' && !f.done),
+    );
+    followUps.push({
+      id: uid(),
+      type: 'attorney',
+      dueAt: whenMs,
+      done: false,
+      note: 'Attorney call',
+    });
+    return {
+      stage: 'attorney_call',
+      attorneyCallAt: whenMs,
+      followUps,
+    };
   });
 }
 
@@ -210,9 +220,9 @@ export async function setCourtNotesCheck(
   lead: Lead,
   patch: Partial<Lead['courtNotesCheck']>,
 ): Promise<void> {
-  await updateLead(lead.id, {
-    courtNotesCheck: { ...lead.courtNotesCheck, ...patch },
-  });
+  await mutateLead(lead.id, (fresh) => ({
+    courtNotesCheck: { ...fresh.courtNotesCheck, ...patch },
+  }));
 }
 
 export async function retainLead(
@@ -224,26 +234,28 @@ export async function retainLead(
     monthlyAmount?: number;
   } = {},
 ): Promise<void> {
-  // Merge onto any existing financing (e.g. a warrant fee added earlier) so the
-  // fee entered at retention is always applied and prior payments are kept.
-  const existing = lead.financing;
-  const now = Date.now();
-  await updateLead(lead.id, {
-    stage: 'retained',
-    retainedAt: lead.retainedAt ?? now,
-    isFinanced: opts.isFinanced ?? false,
-    // Sales follow-ups no longer apply once retained — close them so they don't
-    // linger on the calendar / queues.
-    followUps: (lead.followUps ?? []).map((f) =>
-      f.done ? f : { ...f, done: true, doneAt: now },
-    ),
-    financing: {
-      ...existing,
-      totalFee,
-      payments: existing?.payments ?? [],
-      nextPaymentDue: opts.nextPaymentDue ?? existing?.nextPaymentDue ?? null,
-      monthlyAmount: opts.monthlyAmount ?? existing?.monthlyAmount,
-    },
+  await mutateLead(lead.id, (fresh) => {
+    // Merge onto any existing financing (e.g. a warrant fee added earlier) so the
+    // fee entered at retention is always applied and prior payments are kept.
+    const existing = fresh.financing;
+    const now = Date.now();
+    return {
+      stage: 'retained',
+      retainedAt: fresh.retainedAt ?? now,
+      isFinanced: opts.isFinanced ?? false,
+      // Sales follow-ups no longer apply once retained — close them so they don't
+      // linger on the calendar / queues.
+      followUps: (fresh.followUps ?? []).map((f) =>
+        f.done ? f : { ...f, done: true, doneAt: now },
+      ),
+      financing: {
+        ...existing,
+        totalFee,
+        payments: existing?.payments ?? [],
+        nextPaymentDue: opts.nextPaymentDue ?? existing?.nextPaymentDue ?? null,
+        monthlyAmount: opts.monthlyAmount ?? existing?.monthlyAmount,
+      },
+    };
   });
 }
 
@@ -262,14 +274,16 @@ export async function toggleRetainerSigned(lead: Lead, v: boolean): Promise<void
 }
 
 export async function markIntakeComplete(lead: Lead): Promise<void> {
-  const now = Date.now();
-  await updateLead(lead.id, {
-    stage: 'intake_complete',
-    intakeComplete: true,
-    intakeCompleteAt: now,
-    followUps: (lead.followUps ?? []).map((f) =>
-      f.done ? f : { ...f, done: true, doneAt: now },
-    ),
+  await mutateLead(lead.id, (fresh) => {
+    const now = Date.now();
+    return {
+      stage: 'intake_complete',
+      intakeComplete: true,
+      intakeCompleteAt: now,
+      followUps: (fresh.followUps ?? []).map((f) =>
+        f.done ? f : { ...f, done: true, doneAt: now },
+      ),
+    };
   });
 }
 
@@ -310,49 +324,56 @@ export async function recordPayment(
   lead: Lead,
   req: ChargeRequest,
 ): Promise<{ ok: boolean; error?: string }> {
-  // Enforce the court-date rule at the source so no UI path can bypass it: a
-  // passed, unresolved court date must be updated (or the case dismissed) first.
-  if (needsCourtDateUpdate(lead)) {
-    return {
-      ok: false,
-      error: 'Court date has passed — set a new date or mark the case dismissed before recording payment.',
-    };
-  }
   const res = buildPayment(req);
   if (!res.ok || !res.payment) return { ok: false, error: res.error };
-  // Don't accept more than is owed — overpayment would silently vanish because
-  // the balance floors at zero. Only enforce once a fee has been set.
-  const owed = balanceOf(lead);
-  if (totalFeeOf(lead) > 0 && req.amount > owed + 0.005) {
-    return {
-      ok: false,
-      error: `Payment exceeds the ${owed.toLocaleString('en-US', {
-        style: 'currency',
-        currency: 'USD',
-        maximumFractionDigits: 2,
-      })} balance owed.`,
-    };
+  const payment = res.payment;
+  try {
+    // Transactional: all business-rule checks run against the FRESH document,
+    // so a payment recorded by another rep a second ago can't be overwritten
+    // and can't be double-counted against a stale balance.
+    await mutateLead(lead.id, (fresh) => {
+      // Enforce the court-date rule at the source so no UI path can bypass it: a
+      // passed, unresolved court date must be updated (or dismissed) first.
+      if (needsCourtDateUpdate(fresh)) {
+        throw new LeadCheckError(
+          'Court date has passed — set a new date or mark the case dismissed before recording payment.',
+        );
+      }
+      // Don't accept more than is owed — overpayment would silently vanish
+      // because the balance floors at zero. Only enforce once a fee is set.
+      const owed = balanceOf(fresh);
+      if (totalFeeOf(fresh) > 0 && req.amount > owed + 0.005) {
+        throw new LeadCheckError(
+          `Payment exceeds the ${owed.toLocaleString('en-US', {
+            style: 'currency',
+            currency: 'USD',
+            maximumFractionDigits: 2,
+          })} balance owed.`,
+        );
+      }
+      const financing = fresh.financing ?? { totalFee: 0, payments: [] };
+      const payments = [...financing.payments, payment];
+      const paidTotal = payments.reduce((s, p) => s + p.amount, 0);
+      const total = (financing.totalFee ?? 0) + (financing.warrantFee ?? 0);
+      const newBalance = Math.max(0, total - paidTotal);
+      // Roll the plan's due date forward so a recorded payment doesn't leave the
+      // account showing "past due": clear it when paid off, otherwise advance
+      // one cycle from the prior due date.
+      let nextPaymentDue = financing.nextPaymentDue ?? null;
+      if (newBalance <= 0) {
+        nextPaymentDue = null;
+      } else if (financing.nextPaymentDue) {
+        nextPaymentDue = advanceMonth(financing.nextPaymentDue);
+      }
+      // Don't force isFinanced here — whether a client is "on a payment plan" is
+      // set explicitly at retention. A single full payment shouldn't flag it.
+      return { financing: { ...financing, payments, nextPaymentDue } };
+    });
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof LeadCheckError) return { ok: false, error: e.message };
+    return { ok: false, error: e instanceof Error ? e.message : 'Payment failed' };
   }
-  const financing = lead.financing ?? { totalFee: 0, payments: [] };
-  const payments = [...financing.payments, res.payment];
-  const paidTotal = payments.reduce((s, p) => s + p.amount, 0);
-  const total = (financing.totalFee ?? 0) + (financing.warrantFee ?? 0);
-  const newBalance = Math.max(0, total - paidTotal);
-  // Roll the plan's due date forward so a recorded payment doesn't leave the
-  // account showing "past due": clear it when paid off, otherwise advance one
-  // cycle from the prior due date.
-  let nextPaymentDue = financing.nextPaymentDue ?? null;
-  if (newBalance <= 0) {
-    nextPaymentDue = null;
-  } else if (financing.nextPaymentDue) {
-    nextPaymentDue = advanceMonth(financing.nextPaymentDue);
-  }
-  // Don't force isFinanced here — whether a client is "on a payment plan" is set
-  // explicitly at retention. Recording a single full payment shouldn't flag it.
-  await updateLead(lead.id, {
-    financing: { ...financing, payments, nextPaymentDue },
-  });
-  return { ok: true };
 }
 
 export async function setFinancingTerms(
@@ -360,19 +381,17 @@ export async function setFinancingTerms(
   patch: Partial<NonNullable<Lead['financing']>> & { isFinanced?: boolean },
 ): Promise<void> {
   const { isFinanced, ...fin } = patch;
-  const financing = { ...(lead.financing ?? { totalFee: 0, payments: [] }), ...fin };
-  await updateLead(lead.id, {
-    financing,
+  await mutateLead(lead.id, (fresh) => ({
+    financing: { ...(fresh.financing ?? { totalFee: 0, payments: [] }), ...fin },
     ...(isFinanced !== undefined ? { isFinanced } : {}),
-  });
+  }));
 }
 
 export async function addWarrantFee(lead: Lead, fee = 500): Promise<void> {
-  const financing = lead.financing ?? { totalFee: 0, payments: [] };
-  await updateLead(lead.id, {
+  await mutateLead(lead.id, (fresh) => ({
     hasWarrant: true,
-    financing: { ...financing, warrantFee: fee },
-  });
+    financing: { ...(fresh.financing ?? { totalFee: 0, payments: [] }), warrantFee: fee },
+  }));
 }
 
 // --- Court date enforcement ---
@@ -382,40 +401,44 @@ export async function updateCourtDate(
   newDate: string,
   meta: { time?: string; type?: string } = {},
 ): Promise<void> {
-  const prior: CourtDate | null = lead.nextCourtDate
-    ? {
-        date: lead.nextCourtDate,
-        time: lead.nextCourtTime,
-        type: lead.nextCourtType,
-      }
-    : null;
-  const history = [...(lead.courtDateHistory ?? [])];
-  if (prior) history.push(prior);
-  await updateLead(lead.id, {
-    nextCourtDate: newDate,
-    nextCourtTime: meta.time ?? lead.nextCourtTime,
-    nextCourtType: meta.type ?? lead.nextCourtType,
-    courtDateHistory: history,
-    caseDismissed: false,
+  await mutateLead(lead.id, (fresh) => {
+    const prior: CourtDate | null = fresh.nextCourtDate
+      ? {
+          date: fresh.nextCourtDate,
+          time: fresh.nextCourtTime,
+          type: fresh.nextCourtType,
+        }
+      : null;
+    const history = [...(fresh.courtDateHistory ?? [])];
+    if (prior) history.push(prior);
+    return {
+      nextCourtDate: newDate,
+      nextCourtTime: meta.time ?? fresh.nextCourtTime,
+      nextCourtType: meta.type ?? fresh.nextCourtType,
+      courtDateHistory: history,
+      caseDismissed: false,
+    };
   });
 }
 
 export async function markCaseDismissed(lead: Lead): Promise<void> {
-  // Dismissing closes the matter, so the now-stale court date is moved to
-  // history and cleared — otherwise it lingers as a passed date in views and
-  // keeps re-triggering the "court date passed" prompt.
-  const history = [...(lead.courtDateHistory ?? [])];
-  if (lead.nextCourtDate) {
-    history.push({
-      date: lead.nextCourtDate,
-      time: lead.nextCourtTime,
-      type: lead.nextCourtType,
-    });
-  }
-  await updateLead(lead.id, {
-    caseDismissed: true,
-    nextCourtDate: null,
-    courtDateHistory: history,
+  await mutateLead(lead.id, (fresh) => {
+    // Dismissing closes the matter, so the now-stale court date is moved to
+    // history and cleared — otherwise it lingers as a passed date in views and
+    // keeps re-triggering the "court date passed" prompt.
+    const history = [...(fresh.courtDateHistory ?? [])];
+    if (fresh.nextCourtDate) {
+      history.push({
+        date: fresh.nextCourtDate,
+        time: fresh.nextCourtTime,
+        type: fresh.nextCourtType,
+      });
+    }
+    return {
+      caseDismissed: true,
+      nextCourtDate: null,
+      courtDateHistory: history,
+    };
   });
 }
 
@@ -428,26 +451,29 @@ export async function snoozeFollowUp(
   id: string,
   newDueAt: number,
 ): Promise<void> {
-  const followUps = (lead.followUps ?? []).map((f) =>
-    f.id === id ? { ...f, dueAt: newDueAt } : f,
-  );
-  await updateLead(lead.id, { followUps });
+  await mutateLead(lead.id, (fresh) => ({
+    followUps: (fresh.followUps ?? []).map((f) =>
+      f.id === id ? { ...f, dueAt: newDueAt } : f,
+    ),
+  }));
 }
 
 export async function completeFollowUp(lead: Lead, id: string): Promise<void> {
-  const now = Date.now();
-  const followUps = (lead.followUps ?? []).map((f) =>
-    f.id === id ? { ...f, done: true, doneAt: now } : f,
-  );
-  // Auto-schedule the next touch so an active lead never goes silent after a
-  // single follow-up. Only when nothing else is already pending.
-  const stillPending = followUps.some((f) => !f.done);
-  if (isActiveLead(lead) && !stillPending) {
-    const priorTouches = followUps.filter((f) => f.done).length;
-    const nt = nextTouch(lead, priorTouches);
-    if (nt) {
-      followUps.push({ id: uid(), type: nt.type, dueAt: nt.at, done: false, note: nt.note });
+  await mutateLead(lead.id, (fresh) => {
+    const now = Date.now();
+    const followUps = (fresh.followUps ?? []).map((f) =>
+      f.id === id ? { ...f, done: true, doneAt: now } : f,
+    );
+    // Auto-schedule the next touch so an active lead never goes silent after a
+    // single follow-up. Only when nothing else is already pending.
+    const stillPending = followUps.some((f) => !f.done);
+    if (isActiveLead(fresh) && !stillPending) {
+      const priorTouches = followUps.filter((f) => f.done).length;
+      const nt = nextTouch(fresh, priorTouches);
+      if (nt) {
+        followUps.push({ id: uid(), type: nt.type, dueAt: nt.at, done: false, note: nt.note });
+      }
     }
-  }
-  await updateLead(lead.id, { followUps });
+    return { followUps };
+  });
 }

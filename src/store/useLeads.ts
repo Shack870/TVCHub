@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { create } from 'zustand';
 import type { Lead } from '../types';
 import { watchLeads } from '../lib/db';
+import { announceNewLeads } from '../lib/leadAlerts';
 
 interface LeadState {
   leads: Lead[];
@@ -21,7 +22,10 @@ export const useLeadStore = create<LeadState>((set) => ({
   capped: false,
   subscribed: false,
   // A successful snapshot also clears any prior error.
-  setLeads: (leads, capped) => set({ leads, capped, loading: false, error: null }),
+  setLeads: (leads, capped) => {
+    announceNewLeads(leads);
+    set({ leads, capped, loading: false, error: null });
+  },
   setError: (error) => set({ error, loading: false }),
   setSubscribed: (subscribed) => set({ subscribed }),
 }));

@@ -90,7 +90,60 @@ var DONE_LABEL = 'TVC-Ingested';
 
 /** Main poller — called by the time trigger. */
 function checkInbox() {
-  return scanAndPost_(SEARCH_QUERY);
+  try {
+    var result = scanAndPost_(SEARCH_QUERY);
+    if (result.retries > 0) {
+      recordFailure_('Ingest returned retry for ' + result.retries + ' message(s)');
+    } else {
+      recordSuccess_();
+    }
+    return result.ingested;
+  } catch (err) {
+    recordFailure_('checkInbox threw: ' + err);
+    throw err;
+  }
+}
+
+// ---- Failure alerting -------------------------------------------------------
+// A single transient failure fixes itself on the next minute's run, so only a
+// STREAK of consecutive failing runs (~5 min of downtime) sends an email — and
+// at most once every 6 hours. Set an ALERT_EMAIL Script Property to choose the
+// recipient (defaults to this mailbox).
+
+var FAIL_STREAK_THRESHOLD = 5;
+var ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+function recordSuccess_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('FAIL_STREAK')) props.deleteProperty('FAIL_STREAK');
+}
+
+function recordFailure_(detail) {
+  var props = PropertiesService.getScriptProperties();
+  var streak = Number(props.getProperty('FAIL_STREAK') || '0') + 1;
+  props.setProperty('FAIL_STREAK', String(streak));
+  Logger.log('Failure streak %s: %s', streak, detail);
+  if (streak < FAIL_STREAK_THRESHOLD) return;
+
+  var lastAlert = Number(props.getProperty('LAST_ALERT_AT') || '0');
+  if (Date.now() - lastAlert < ALERT_COOLDOWN_MS) return;
+  props.setProperty('LAST_ALERT_AT', String(Date.now()));
+
+  var to =
+    props.getProperty('ALERT_EMAIL') || Session.getEffectiveUser().getEmail();
+  MailApp.sendEmail(
+    to,
+    '[TVCHub] Lead ingestion is failing',
+    'The Gmail lead pipeline has failed ' + streak + ' runs in a row.\n\n' +
+      'Latest error: ' + detail + '\n\n' +
+      'New TVC referrals are NOT reaching the board. Check:\n' +
+      '  1. script.google.com -> Executions for error details\n' +
+      '  2. OpenAI status/quota (extraction errors return retry)\n' +
+      '  3. Firebase console -> Functions -> ingestEmail logs\n\n' +
+      'Unprocessed emails stay unlabeled and will import automatically ' +
+      'once the pipeline recovers.',
+  );
+  Logger.log('Alert email sent to %s', to);
 }
 
 /**
@@ -124,6 +177,7 @@ function scanAndPost_(query) {
   Logger.log('Query: %s', query);
   Logger.log('Matched %s thread(s).', threads.length);
   var ingested = 0;
+  var retries = 0;
 
   threads.forEach(function (thread) {
     var messages = thread.getMessages();
@@ -141,14 +195,17 @@ function scanAndPost_(query) {
 
       var status = postMessage_(config, msg, subject, from);
       if (status === 'created') ingested++;
-      else if (status === 'retry') allHandled = false;
+      else if (status === 'retry') {
+        retries++;
+        allHandled = false;
+      }
     }
 
     // Label threads with no matching message too, so we never rescan them.
     if (allHandled || !sawMatch) thread.addLabel(label);
   });
 
-  return ingested;
+  return { ingested: ingested, retries: retries };
 }
 
 /**
