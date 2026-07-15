@@ -228,7 +228,12 @@ async function mergeIntoExisting(
   const update: Record<string, unknown> = {};
   const filled: string[] = [];
   for (const key of MERGEABLE_FIELDS) {
-    if (!isEmpty(fields[key]) && isEmpty(ex[key])) {
+    // The "⚠ Needs Review" placeholder counts as an empty name so a reprocess
+    // with a real extraction can replace it.
+    const exEmpty =
+      isEmpty(ex[key]) ||
+      (key === "name" && /needs review/i.test(String(ex[key] ?? "")));
+    if (!isEmpty(fields[key]) && exEmpty) {
       update[key] = fields[key];
       filled.push(key);
     }
@@ -301,6 +306,10 @@ export const ingestEmail = onRequest(
 
     // Dedupe by Gmail message id up front (same message reposted) — this also
     // saves an LLM call and prevents duplicate review cards on reprocessing.
+    // Exception: if the existing card is still flagged needs-review (e.g. its
+    // PDF couldn't be read during an LLM outage), fall through so a reprocess
+    // (Apps Script rescanRecent) can re-extract and heal it in place.
+    let reprocessTarget: FirebaseFirestore.QueryDocumentSnapshot | null = null;
     if (body.messageId) {
       const dup = await db
         .collection("leads")
@@ -308,8 +317,11 @@ export const ingestEmail = onRequest(
         .limit(1)
         .get();
       if (!dup.empty) {
-        res.json({ ok: true, skipped: "duplicate message", id: dup.docs[0].id });
-        return;
+        if (!dup.docs[0].data().needsReview) {
+          res.json({ ok: true, skipped: "duplicate message", id: dup.docs[0].id });
+          return;
+        }
+        reprocessTarget = dup.docs[0];
       }
     }
 
@@ -397,6 +409,16 @@ export const ingestEmail = onRequest(
         fields.name = n;
         subjectNamed = true;
       }
+    }
+
+    // Reprocessing a message whose card is still flagged: merge the fresh
+    // extraction into that card (fills fields, attaches PDFs, clears the flag
+    // once it has a real name + core data) and stop.
+    if (reprocessTarget) {
+      const filled = await mergeIntoExisting(reprocessTarget, fields, body);
+      logger.info("Reprocessed needs-review card", { id: reprocessTarget.id, filled });
+      res.json({ ok: true, merged: true, filled, id: reprocessTarget.id });
+      return;
     }
 
     // Dedupe by TVC case number FIRST — before the name check — so a thin,
