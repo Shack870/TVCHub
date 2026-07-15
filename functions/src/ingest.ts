@@ -64,14 +64,37 @@ function nameMatches(a: unknown, b: unknown): boolean {
 }
 
 // Pulls a 6-8 digit TVC case number out of the email subject as a backstop for
-// PDF-only emails whose body/PDF extraction missed it. Tied to TVC/Case/#
-// context so it never grabs an unrelated number.
+// PDF-only emails whose body/PDF extraction missed it. Prefers a number with
+// TVC/Case/# context (subjects can also carry member ids, e.g. "(19830758)");
+// otherwise accepts the subject's single unambiguous 6-8 digit number, which
+// covers formats like "TVC NEW 25% CASE FILES - 1561355 - MANUEL COSTA" and
+// "Alberta King - 1525899".
 function caseNumberFromSubject(subject: string): string | undefined {
-  return (
-    subject.match(/(?:TVC|Legal\s*Case|Case)\D{0,8}(\d{6,8})/i)?.[1] ||
-    subject.match(/#\s*(\d{6,8})/)?.[1] ||
-    undefined
-  );
+  const labeled =
+    subject.match(/(?:TVC|Legal\s*Case|Case)\D{0,20}?(\d{6,8})/i)?.[1] ||
+    subject.match(/#\s*(\d{6,8})/)?.[1];
+  if (labeled) return labeled;
+  const all = [...subject.matchAll(/\b(\d{6,8})\b/g)].map((m) => m[1]);
+  const uniq = [...new Set(all)];
+  return uniq.length === 1 ? uniq[0] : undefined;
+}
+
+// Recovers the member's name from the subject line when body/PDF extraction
+// couldn't find one — TVC subjects usually carry it ("Case:1559085 - Ronald
+// Brisa (19830758)", "TVC NEW 25% CASE FILES - 1561355 - MANUEL ERNESTO
+// COSTA"). Only trusted when the subject also yielded a case number, so a
+// generic subject like "Forwarded email" can never become a lead name.
+function nameFromSubject(subject: string): string | undefined {
+  const cleaned = subject
+    .replace(/\(?\d{5,}\)?/g, " ") // case numbers / member ids
+    .replace(/\d+\s*%/g, " ") // "25%" coverage markers
+    .replace(/\b(TVC|NEW|CASE|FILES?|LEGAL|COVERAGE|RE|FWD?|FW)\b:?/gi, " ")
+    .replace(/[#:()[\]\-–—_,.]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const words = cleaned.split(" ").filter((w) => /^[A-Za-z][A-Za-z.'-]*$/.test(w));
+  if (words.length < 2 || words.length > 5) return undefined;
+  return words.join(" ");
 }
 
 // Uploads email attachments to referrals/{leadId}/ and returns their metadata
@@ -230,6 +253,23 @@ async function mergeIntoExisting(
     }
   }
 
+  // If this merge gave a flagged card a real name and core referral data, it
+  // no longer needs human review — clear the flag automatically.
+  if (ex.needsReview) {
+    const merged = { ...ex, ...update } as Record<string, unknown>;
+    const hasRealName =
+      !isEmpty(merged.name) && !/needs review/i.test(String(merged.name));
+    const hasCoreData = Boolean(
+      merged.courtName ||
+        merged.county ||
+        (Array.isArray(merged.tickets) && merged.tickets.length > 0),
+    );
+    if (hasRealName && hasCoreData) {
+      update.needsReview = false;
+      filled.push("needsReview cleared");
+    }
+  }
+
   if (Object.keys(update).length) {
     update.updatedAt = Date.now();
     await existing.ref.update(update);
@@ -345,6 +385,20 @@ export const ingestEmail = onRequest(
       if (fromSubject) fields.tvcCaseNumber = fromSubject;
     }
 
+    // Name backstop from the subject — only when the subject also identified
+    // the case, so this can't invent a name from a generic subject. Turns a
+    // would-be "Needs Review" card into a real, callable lead. If the core
+    // referral fields are still missing, keep the review flag so staff know to
+    // open the attached PDF.
+    let subjectNamed = false;
+    if (isEmpty(fields.name) && !isEmpty(fields.tvcCaseNumber)) {
+      const n = nameFromSubject(subject);
+      if (n) {
+        fields.name = n;
+        subjectNamed = true;
+      }
+    }
+
     // Dedupe by TVC case number FIRST — before the name check — so a thin,
     // PDF-only re-send merges into the existing lead (contributing any new
     // attachments) instead of spawning a "Needs Review" card. Also rolls a
@@ -422,8 +476,14 @@ export const ingestEmail = onRequest(
       return;
     }
 
-    const id = await createLeadDoc(db, fields, body, text, { name: rawName });
-    logger.info("Lead created from email", { id });
+    // A subject-derived name with no core referral data means the PDF wasn't
+    // readable (e.g. LLM outage): keep the review flag so staff open the PDF.
+    const thinSubjectCard = subjectNamed && !hasCore(fields);
+    const id = await createLeadDoc(db, fields, body, text, {
+      name: rawName,
+      needsReview: thinSubjectCard,
+    });
+    logger.info("Lead created from email", { id, thinSubjectCard });
     res.json({ ok: true, id });
   },
 );
