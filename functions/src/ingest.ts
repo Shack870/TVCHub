@@ -97,6 +97,22 @@ function nameFromSubject(subject: string): string | undefined {
   return words.join(" ");
 }
 
+// Detects an LLM extraction that returned textbook placeholder data instead of
+// the document's real contents (seen in production: "John Doe, 123 Main St,
+// Anytown TX, johndoe@example.com"). Such an extraction is worse than nothing —
+// it fabricates a client — so the caller discards it and retries later.
+function isPlaceholderExtraction(fields: Record<string, unknown>): boolean {
+  const name = lower(fields.name);
+  const email = lower(fields.email);
+  const address = lower(fields.address);
+  return (
+    /^(john|jane)\s+doe$/.test(name) ||
+    /@example\.(com|org|net)$/.test(email) ||
+    /\banytown\b/.test(address) ||
+    /^123 main st/.test(address)
+  );
+}
+
 // Uploads email attachments to referrals/{leadId}/ and returns their metadata
 // with a tokenized download URL for the UI.
 async function storeAttachments(
@@ -400,6 +416,18 @@ export const ingestEmail = onRequest(
       }
     }
 
+    // A hallucinated extraction fabricates a client — discard it and ask the
+    // script to retry this message on its next run (hallucinations are
+    // nondeterministic, so a second pass usually reads the real document).
+    if (isPlaceholderExtraction(fields)) {
+      logger.error("Placeholder extraction discarded; requesting retry", {
+        name: fields.name,
+        subject,
+      });
+      res.status(503).json({ ok: false, retry: true, error: "placeholder extraction" });
+      return;
+    }
+
     // A human note from TVC staff (question, complaint, status request) rather
     // than a referral: file it as an inbox message post-it instead of a lead
     // card. Trusted only when the LLM classified it AND no referral core data
@@ -458,13 +486,31 @@ export const ingestEmail = onRequest(
     delete fields.emailKind;
     delete fields.messageText;
 
-    // Backstop: if neither the body nor the PDF yielded a case number, try the
-    // subject line. PDF-only re-sends often still carry "TVC #1234567" there,
-    // and recovering it lets the case-number dedup below link the email to its
-    // lead even when it's too thin to parse a name.
-    if (isEmpty(fields.tvcCaseNumber)) {
-      const fromSubject = caseNumberFromSubject(subject);
-      if (fromSubject) fields.tvcCaseNumber = fromSubject;
+    // The subject's case number is authoritative. TVC staff type it into every
+    // referral subject, while the extractor has returned the PDF's *filename*
+    // (an internal document id like 50843389) as the case number — which breaks
+    // dedup and splits one member across two cards. So: prefer the subject's
+    // number whenever it exists, and discard an extracted number that merely
+    // echoes an attachment filename.
+    const subjectCase = caseNumberFromSubject(subject);
+    if (subjectCase) {
+      if (fields.tvcCaseNumber && String(fields.tvcCaseNumber) !== subjectCase) {
+        logger.warn("Extracted case number overridden by subject", {
+          extracted: fields.tvcCaseNumber,
+          subject: subjectCase,
+        });
+      }
+      fields.tvcCaseNumber = subjectCase;
+    } else if (
+      fields.tvcCaseNumber &&
+      (body.attachments || []).some((a) =>
+        (a.name || "").includes(String(fields.tvcCaseNumber)),
+      )
+    ) {
+      logger.warn("Discarding filename-derived case number", {
+        extracted: fields.tvcCaseNumber,
+      });
+      delete fields.tvcCaseNumber;
     }
 
     // Name backstop from the subject — only when the subject also identified

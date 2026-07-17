@@ -25,7 +25,8 @@ Rules:
 - "tvcNotes" = the "Description/Entry/Date" activity log as readable text.
 - "emailKind": "referral" when the content is a structured case referral (member/court/ticket data or a referral form); "message" when it is a human-written note, question, complaint, or status request from TVC staff about a case (e.g. "Member is upset... can you give him an update?"). A message may mention a case number and member name but carries no referral form data.
 - "messageText": only when emailKind is "message" — the human-written body verbatim, without signature blocks, legal footers, or inline-image placeholders. Otherwise null.
-- Use null for anything not present. Do not invent values. Strip the internal "FLEET" tag from city names.`;
+- Use null for anything not present. Do not invent values. Strip the internal "FLEET" tag from city names.
+- NEVER output placeholder or sample values (e.g. "John Doe", "123 Main St", "Anytown", "@example.com", 555 phone numbers). If the document is unreadable or contains no referral data, return null for every field instead.`;
 
 export interface ExtractInput {
   images?: string[]; // base64 PNGs (no data: prefix)
