@@ -167,6 +167,10 @@ export interface Lead {
   pdfUrl?: string;
   attachments?: LeadAttachment[];
   receivedAt: number;
+  // Set when TVC re-sends a case we already have — the board floats the card
+  // back to the top and stamps it as re-sent.
+  lastReferralAt?: number;
+  referralCount?: number;
 
   // --- Ownership ---
   owner?: string | null; // display label of the operator who owns this lead

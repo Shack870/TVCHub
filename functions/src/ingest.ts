@@ -223,10 +223,22 @@ async function mergeIntoExisting(
   existing: FirebaseFirestore.QueryDocumentSnapshot,
   fields: Record<string, unknown>,
   body: IngestBody,
+  opts: { bump?: boolean } = {},
 ): Promise<string[]> {
   const ex = existing.data();
   const update: Record<string, unknown> = {};
   const filled: string[] = [];
+
+  // A true re-send (new Gmail message for a case we already have) usually means
+  // TVC is nudging the firm about an unworked referral. Stamp it so the board
+  // can float the card back to the top instead of leaving it buried under its
+  // original arrival date.
+  if (opts.bump) {
+    update.lastReferralAt = Date.now();
+    update.referralCount =
+      (typeof ex.referralCount === "number" ? ex.referralCount : 1) + 1;
+    filled.push("lastReferralAt");
+  }
   for (const key of MERGEABLE_FIELDS) {
     // The "⚠ Needs Review" placeholder counts as an empty name so a reprocess
     // with a real extraction can replace it.
@@ -436,7 +448,7 @@ export const ingestEmail = onRequest(
         const existing = dupCase.docs[0];
         const ex = existing.data();
         // Fill any fields the existing card lacks and attach new PDFs.
-        const filled = await mergeIntoExisting(existing, fields, body);
+        const filled = await mergeIntoExisting(existing, fields, body, { bump: true });
         const newDate = fields.nextCourtDate as string | undefined;
         if (newDate && newDate !== ex.nextCourtDate) {
           const history = Array.isArray(ex.courtDateHistory) ? [...ex.courtDateHistory] : [];
@@ -492,7 +504,7 @@ export const ingestEmail = onRequest(
     // number. Match an existing card by phone/email/name+county and merge.
     const match = await findIdentityMatch(db, fields);
     if (match) {
-      const filled = await mergeIntoExisting(match, fields, body);
+      const filled = await mergeIntoExisting(match, fields, body, { bump: true });
       logger.info("Merged duplicate into existing lead", { id: match.id, filled });
       res.json({ ok: true, merged: true, filled, id: match.id });
       return;

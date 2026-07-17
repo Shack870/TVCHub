@@ -45,6 +45,13 @@ export function NotepadCard({
   const appeared = fmtAppeared(appearedAt);
   const dayColor = weekdayColor(appearedAt);
 
+  // TVC re-sent this case after we already had it — usually a nudge that the
+  // referral hasn't been worked yet. Only flag genuine re-sends, not the
+  // near-simultaneous text+PDF pair the first referral often arrives as.
+  const resent =
+    (lead.lastReferralAt ?? 0) - appearedAt > 3600000 &&
+    (lead.contactAttempts?.length ?? 0) === 0;
+
   return (
     <motion.div
       whileHover={{ y: -3 }}
@@ -111,6 +118,15 @@ export function NotepadCard({
           <div className="flex shrink-0 flex-col items-end gap-1">
             <Badge tone={stageTone(lead.stage)}>{STAGE_LABELS[lead.stage]}</Badge>
             {lead.needsReview && <Badge tone="amber">Needs review</Badge>}
+            {resent && (
+              <Badge tone="red">
+                re-sent by TVC{' '}
+                {new Date(lead.lastReferralAt!).toLocaleDateString('en-US', {
+                  month: 'numeric',
+                  day: 'numeric',
+                })}
+              </Badge>
+            )}
             {uncontacted && <Badge tone={ageTone}>uncontacted · {ageLabel}</Badge>}
             {lead.owner && (
               <span className="data text-[10px] text-pad-inkSoft/70">{lead.owner}</span>

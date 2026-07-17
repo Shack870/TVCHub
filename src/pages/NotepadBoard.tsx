@@ -20,9 +20,10 @@ function courtRank(l: Lead): number {
   return d === null ? Number.POSITIVE_INFINITY : d;
 }
 
-// When the lead hit the app — the same timestamp shown on the card stamp.
+// When the lead last demanded attention — a TVC re-send bumps it back to the
+// top of "Newest" even though the card keeps its original arrival stamp.
 function appearedAt(l: Lead): number {
-  return l.receivedAt ?? l.createdAt;
+  return Math.max(l.lastReferralAt ?? 0, l.receivedAt ?? l.createdAt);
 }
 
 function matches(l: Lead, q: string): boolean {
