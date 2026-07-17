@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import type { TvcMessage } from '../types';
-import { setMessageHandled } from '../lib/db';
+import { archiveMessage, setMessageHandled } from '../lib/db';
 import { useAuth } from '../context/AuthContext';
 import { Modal } from './ui/Modal';
 
@@ -88,33 +88,50 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           <p className="mt-4 whitespace-pre-wrap font-hand text-2xl leading-snug text-yellow-950">
             {msg.message}
           </p>
-          <div className="mt-6 flex justify-end gap-2">
-            <button
-              className={`rounded-md px-4 py-2 font-type text-sm font-semibold ${
-                msg.handled
-                  ? 'bg-yellow-400 text-yellow-950 hover:bg-yellow-300'
-                  : 'bg-black/10 text-yellow-950/70 hover:bg-black/15'
-              }`}
-              onClick={() => {
-                setMessageHandled(msg.id, false);
-                setOpen(false);
-              }}
-            >
-              Unhandled
-            </button>
-            <button
-              className={`rounded-md px-4 py-2 font-type text-sm font-semibold ${
-                msg.handled
-                  ? 'bg-black/10 text-yellow-950/70 hover:bg-black/15'
-                  : 'bg-emerald-600 text-white hover:bg-emerald-500'
-              }`}
-              onClick={() => {
-                setMessageHandled(msg.id, true, user?.email ?? null);
-                setOpen(false);
-              }}
-            >
-              Handled
-            </button>
+          <div className="mt-6 flex items-center justify-between gap-2">
+            {/* Archiving takes the note off the desk for good; only offered
+                once it's handled so nothing open gets buried by accident. */}
+            {msg.handled ? (
+              <button
+                className="rounded-md px-3 py-2 font-type text-sm font-semibold text-yellow-950/60 hover:bg-black/10 hover:text-yellow-950"
+                onClick={() => {
+                  archiveMessage(msg.id);
+                  setOpen(false);
+                }}
+              >
+                Archive
+              </button>
+            ) : (
+              <span />
+            )}
+            <div className="flex gap-2">
+              <button
+                className={`rounded-md px-4 py-2 font-type text-sm font-semibold ${
+                  msg.handled
+                    ? 'bg-yellow-400 text-yellow-950 hover:bg-yellow-300'
+                    : 'bg-black/10 text-yellow-950/70 hover:bg-black/15'
+                }`}
+                onClick={() => {
+                  setMessageHandled(msg.id, false);
+                  setOpen(false);
+                }}
+              >
+                Unhandled
+              </button>
+              <button
+                className={`rounded-md px-4 py-2 font-type text-sm font-semibold ${
+                  msg.handled
+                    ? 'bg-black/10 text-yellow-950/70 hover:bg-black/15'
+                    : 'bg-emerald-600 text-white hover:bg-emerald-500'
+                }`}
+                onClick={() => {
+                  setMessageHandled(msg.id, true, user?.email ?? null);
+                  setOpen(false);
+                }}
+              >
+                Handled
+              </button>
+            </div>
           </div>
         </div>
       </Modal>

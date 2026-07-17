@@ -88,6 +88,19 @@ export function watchMessages(
   );
 }
 
+// Takes a handled note off the desk for good (kept in the database).
+export async function archiveMessage(id: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'messages', id), {
+      deletedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  } catch (e) {
+    notify.error(`Couldn't archive the message — ${errMsg(e)}`);
+    throw e;
+  }
+}
+
 export async function setMessageHandled(
   id: string,
   handled: boolean,

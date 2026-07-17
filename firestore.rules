@@ -32,7 +32,7 @@ service cloud.firestore {
       allow read: if firmUser();
       allow update: if firmUser()
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['handled', 'handledAt', 'handledBy', 'updatedAt']);
+             .hasOnly(['handled', 'handledAt', 'handledBy', 'deletedAt', 'updatedAt']);
     }
 
     match /users/{uid} {

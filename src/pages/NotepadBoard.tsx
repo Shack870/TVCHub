@@ -56,6 +56,7 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const notes = useMemo(() => {
     const weekAgo = Date.now() - 7 * 86400000;
     return allMessages
+      .filter((m) => !m.deletedAt)
       .filter((m) => !m.handled || (m.handledAt ?? m.updatedAt) > weekAgo)
       .sort((a, b) =>
         a.handled === b.handled ? b.receivedAt - a.receivedAt : a.handled ? 1 : -1,

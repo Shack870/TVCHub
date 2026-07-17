@@ -234,4 +234,7 @@ export interface TvcMessage {
   handledBy?: string | null;
   createdAt: number;
   updatedAt: number;
+  // Soft-delete: archived notes disappear from the desk but stay in the
+  // database.
+  deletedAt?: number | null;
 }
