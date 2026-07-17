@@ -2,6 +2,7 @@
 // upload path (page images) and the Gmail intake path (email text).
 
 const SCHEMA_KEYS = [
+  "emailKind", "messageText",
   "tvcCaseNumber", "name", "phone", "email", "address", "birthdate", "language",
   "driversLicense", "driversLicenseState", "driversLicenseType", "vehicleType",
   "violationDate", "caseOpenedOn", "familyMemberName", "familyMemberRelationship",
@@ -22,6 +23,8 @@ Rules:
 - "tickets" is an array of {number, violation, code} from the Tickets table; "charge" is a short "; "-joined summary of the violations.
 - Dates as ISO yyyy-mm-dd. "nextCourtDate"/"nextCourtTime"/"nextCourtType" from the first row of "Court Dates".
 - "tvcNotes" = the "Description/Entry/Date" activity log as readable text.
+- "emailKind": "referral" when the content is a structured case referral (member/court/ticket data or a referral form); "message" when it is a human-written note, question, complaint, or status request from TVC staff about a case (e.g. "Member is upset... can you give him an update?"). A message may mention a case number and member name but carries no referral form data.
+- "messageText": only when emailKind is "message" — the human-written body verbatim, without signature blocks, legal footers, or inline-image placeholders. Otherwise null.
 - Use null for anything not present. Do not invent values. Strip the internal "FLEET" tag from city names.`;
 
 export interface ExtractInput {

@@ -1,6 +1,7 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { useLeadsSubscription } from './store/useLeads';
+import { useMessagesSubscription } from './store/useMessages';
 import { AppShell } from './components/AppShell';
 import { LoginScreen } from './components/LoginScreen';
 import { HomeView } from './pages/HomeView';
@@ -20,6 +21,7 @@ import { Toaster } from './components/ui/Toaster';
 
 function AuthedApp() {
   useLeadsSubscription(true);
+  useMessagesSubscription(true);
   return (
     <BrowserRouter>
       <AppShell>

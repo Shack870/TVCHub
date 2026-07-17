@@ -216,3 +216,22 @@ export interface AppUser {
   email: string | null;
   displayName: string | null;
 }
+
+// A human note from TVC staff (question, complaint, status request) — displayed
+// as a post-it on the Desk rather than a lead card. Created by the ingest
+// function; the app only toggles `handled`.
+export interface TvcMessage {
+  id: string;
+  from: string;
+  fromName: string;
+  subject?: string | null;
+  message: string;
+  tvcCaseNumber?: string | null;
+  memberName?: string | null;
+  receivedAt: number;
+  handled: boolean;
+  handledAt?: number | null;
+  handledBy?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}

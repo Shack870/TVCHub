@@ -7,6 +7,8 @@ import { sendToInitialLeads } from '../lib/actions';
 import { daysUntilCourt } from '../lib/dates';
 import type { Lead } from '../types';
 import { NotepadCard } from '../components/NotepadCard';
+import { MessagePostIt } from '../components/MessagePostIt';
+import { useMessages } from '../store/useMessages';
 import { Badge } from '../components/ui/Badge';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
@@ -47,6 +49,18 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const [dir, setDir] = useState(1);
   const [backLead, setBackLead] = useState<Lead | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // TVC staff notes stuck to the top of the desk. Unhandled ones stay until
+  // dealt with; handled ones linger a week so you can see what was resolved.
+  const allMessages = useMessages();
+  const notes = useMemo(() => {
+    const weekAgo = Date.now() - 7 * 86400000;
+    return allMessages
+      .filter((m) => !m.handled || (m.handledAt ?? m.updatedAt) > weekAgo)
+      .sort((a, b) =>
+        a.handled === b.handled ? b.receivedAt - a.receivedAt : a.handled ? 1 : -1,
+      );
+  }, [allMessages]);
 
   const counts = useMemo(
     () => ({
@@ -212,6 +226,19 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
       )}
 
       <div className="mb-5">{scopeToggle}</div>
+
+      {notes.length > 0 && (
+        <section className="mb-7">
+          <p className="mb-3 text-[11px] uppercase tracking-widest text-manila/50">
+            Messages from TVC
+          </p>
+          <div className="flex gap-5 overflow-x-auto pb-3 pt-2">
+            {notes.map((m, i) => (
+              <MessagePostIt key={m.id} msg={m} index={i} />
+            ))}
+          </div>
+        </section>
+      )}
 
       <ConfirmDialog
         open={backLead !== null}

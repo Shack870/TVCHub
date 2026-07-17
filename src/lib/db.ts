@@ -13,7 +13,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { notify } from '../store/useToast';
-import type { Lead } from '../types';
+import type { Lead, TvcMessage } from '../types';
 
 const LEADS = 'leads';
 
@@ -70,6 +70,40 @@ export function watchArchivedLeads(cb: (leads: Lead[]) => void): () => void {
     (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) }) as Lead)),
     (err) => console.error('watchArchivedLeads error', err),
   );
+}
+
+// TVC staff messages (post-it notes on the Desk). Newest first.
+export function watchMessages(
+  cb: (messages: TvcMessage[]) => void,
+  onError?: (msg: string) => void,
+): () => void {
+  const q = query(collection(db, 'messages'), orderBy('receivedAt', 'desc'), limit(200));
+  return onSnapshot(
+    q,
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) }) as TvcMessage)),
+    (err) => {
+      console.error('watchMessages error', err);
+      onError?.(errMsg(err));
+    },
+  );
+}
+
+export async function setMessageHandled(
+  id: string,
+  handled: boolean,
+  handledBy?: string | null,
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'messages', id), {
+      handled,
+      handledAt: handled ? Date.now() : null,
+      handledBy: handled ? (handledBy ?? null) : null,
+      updatedAt: Date.now(),
+    });
+  } catch (e) {
+    notify.error(`Couldn't update the message — ${errMsg(e)}`);
+    throw e;
+  }
 }
 
 export async function createLead(data: Omit<Lead, 'id'>): Promise<string> {

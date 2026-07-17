@@ -400,6 +400,64 @@ export const ingestEmail = onRequest(
       }
     }
 
+    // A human note from TVC staff (question, complaint, status request) rather
+    // than a referral: file it as an inbox message post-it instead of a lead
+    // card. Trusted only when the LLM classified it AND no referral core data
+    // was found — a real referral can never be demoted to a message.
+    if (
+      fields.emailKind === "message" &&
+      !hasCore(fields) &&
+      (Array.isArray(fields.tickets) ? fields.tickets.length === 0 : true)
+    ) {
+      const dupMsg = body.messageId
+        ? await db
+            .collection("messages")
+            .where("gmailMessageId", "==", body.messageId)
+            .limit(1)
+            .get()
+        : null;
+      if (dupMsg && !dupMsg.empty) {
+        res.json({ ok: true, skipped: "duplicate message", id: dupMsg.docs[0].id });
+        return;
+      }
+      const now = Date.now();
+      const fromRaw = body.from || "";
+      const fromName =
+        fromRaw.match(/^"?([^"<]+?)"?\s*</)?.[1]?.trim() || fromRaw.trim();
+      const messageText =
+        (typeof fields.messageText === "string" && fields.messageText.trim()) ||
+        text.slice(0, 4000);
+      const ref = await db.collection("messages").add({
+        kind: "tvc_message",
+        from: fromRaw,
+        fromName,
+        subject: body.subject || null,
+        message: messageText,
+        tvcCaseNumber: (fields.tvcCaseNumber as string) || caseNumberFromSubject(subject) || null,
+        memberName: (fields.name as string) || null,
+        gmailMessageId: body.messageId || null,
+        receivedAt: body.receivedAt || now,
+        handled: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      // If this same email was previously mis-filed as a needs-review lead
+      // card (before message classification existed), archive that card — the
+      // post-it replaces it.
+      if (reprocessTarget) {
+        await reprocessTarget.ref.update({ deletedAt: now, updatedAt: now });
+        logger.info("Archived mis-filed review card replaced by message", {
+          leadId: reprocessTarget.id,
+        });
+      }
+      logger.info("TVC message stored as post-it", { id: ref.id, fromName });
+      res.json({ ok: true, message: true, id: ref.id });
+      return;
+    }
+    // Classification metadata must never end up on a lead card.
+    delete fields.emailKind;
+    delete fields.messageText;
+
     // Backstop: if neither the body nor the PDF yielded a case number, try the
     // subject line. PDF-only re-sends often still carry "TVC #1234567" there,
     // and recovering it lets the case-number dedup below link the email to its

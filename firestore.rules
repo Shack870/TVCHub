@@ -25,6 +25,16 @@ service cloud.firestore {
       allow delete: if firmUser();
     }
 
+    // TVC staff messages (post-it notes). Created by the ingest function
+    // (Admin SDK bypasses rules); the app only reads them and toggles the
+    // handled flag.
+    match /messages/{messageId} {
+      allow read: if firmUser();
+      allow update: if firmUser()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['handled', 'handledAt', 'handledBy', 'updatedAt']);
+    }
+
     match /users/{uid} {
       allow read: if firmUser();
       allow write: if firmUser() && request.auth.uid == uid;

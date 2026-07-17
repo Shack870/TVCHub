@@ -120,7 +120,7 @@ export function NotepadCard({
             {lead.needsReview && <Badge tone="amber">Needs review</Badge>}
             {resent && (
               <Badge tone="red">
-                re-sent by TVC{' '}
+                Resubmitted{' '}
                 {new Date(lead.lastReferralAt!).toLocaleDateString('en-US', {
                   month: 'numeric',
                   day: 'numeric',
