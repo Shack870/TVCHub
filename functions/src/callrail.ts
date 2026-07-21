@@ -175,6 +175,32 @@ export async function ensureFollowUp(
   return added;
 }
 
+// A returned call closes the loop: archive any open "Missed call" post-its
+// for this lead from before the call. "Upset caller" notes are left for a
+// human even though they share the missed_call kind.
+async function clearMissedCallPostIts(
+  db: ReturnType<typeof getFirestore>,
+  leadId: string,
+  beforeTs: number,
+): Promise<number> {
+  const snap = await db
+    .collection("messages")
+    .where("leadId", "==", leadId)
+    .where("kind", "==", "missed_call")
+    .get();
+  const now = Date.now();
+  let cleared = 0;
+  for (const doc of snap.docs) {
+    const m = doc.data();
+    if (m.deletedAt) continue;
+    if (!String(m.subject || "").startsWith("Missed call")) continue;
+    if ((m.receivedAt ?? 0) > beforeTs) continue; // they missed us again AFTER this call
+    await doc.ref.update({ handled: true, deletedAt: now, updatedAt: now });
+    cleared++;
+  }
+  return cleared;
+}
+
 export const syncCallRail = onSchedule(
   {
     schedule: "every 5 minutes",
@@ -322,6 +348,20 @@ export const syncCallRail = onSchedule(
         if (outcome === "spoke") patch.lastConnectedAt = startedAt;
         tx.update(ref, patch);
       });
+
+      // We called them back (any outbound attempt), or they got through to us
+      // (inbound conversation) — the missed-call post-it has served its
+      // purpose, so take it off the desk automatically.
+      if (call.direction === "outbound" || outcome === "spoke") {
+        const cleared = await clearMissedCallPostIts(db, lead.id, startedAt);
+        if (cleared) {
+          logger.info("Cleared missed-call post-its after returned call", {
+            leadId: lead.id,
+            cleared,
+            callId: call.id,
+          });
+        }
+      }
 
       // A specific callback day agreed on the call becomes a real follow-up so
       // it lands on the calendar and the Today queue.
