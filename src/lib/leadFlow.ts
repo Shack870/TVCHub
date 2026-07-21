@@ -11,6 +11,7 @@ export const STAGE_LABELS: Record<Stage, string> = {
   attorney_call: 'Attorney Call',
   nurture: 'Follow-Up',
   retained: 'Retained',
+  financed: 'Financed',
   intake_complete: 'Intake Complete',
   lost: 'No Sale',
 };
@@ -73,14 +74,14 @@ export function isPipelineLead(lead: Lead): boolean {
   return ['callback', 'pitched', 'attorney_call', 'nurture'].includes(lead.stage);
 }
 
-// Still being worked: not retained, handed off, or written off.
+// Still being worked: not retained, financed, handed off, or written off.
 export function isActiveLead(lead: Lead): boolean {
-  return !['retained', 'intake_complete', 'lost'].includes(lead.stage);
+  return !['retained', 'financed', 'intake_complete', 'lost'].includes(lead.stage);
 }
 
 // Reached a final disposition (won or lost).
 export function isTerminal(lead: Lead): boolean {
-  return ['retained', 'intake_complete', 'lost'].includes(lead.stage);
+  return ['retained', 'financed', 'intake_complete', 'lost'].includes(lead.stage);
 }
 
 // Which stage a contact outcome moves the lead to.
@@ -125,9 +126,11 @@ export function makeEmptyLead(partial: Partial<Lead>): Omit<Lead, 'id'> {
   };
 }
 
-// A lead we actually signed (retained, possibly already handed off).
+// A lead we actually signed (retained/financed, possibly already handed off).
 export function isClient(lead: Lead): boolean {
-  return lead.stage === 'retained' || lead.stage === 'intake_complete';
+  return (
+    lead.stage === 'retained' || lead.stage === 'financed' || lead.stage === 'intake_complete'
+  );
 }
 
 // Has a fee and owes nothing — the balance is the source of truth, regardless
@@ -139,7 +142,10 @@ export function isPaidInFull(lead: Lead): boolean {
 // A lead belongs in the Financing view while it owes money — either a retained
 // client on/owing a balance, or a non-client who's been charged a warrant fee
 // (so that money is actually collectable somewhere). Paid-off = drops out.
+// Leads in the dedicated "financed" stage always show here, even before a
+// payment-plan record has been filled in.
 export function isFinancingClient(lead: Lead): boolean {
+  if (lead.stage === 'financed') return true;
   if (balanceOf(lead) <= 0) return false;
   return isClient(lead) || Boolean(lead.hasWarrant);
 }

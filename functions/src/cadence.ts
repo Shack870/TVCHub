@@ -151,7 +151,7 @@ export const cadenceSweep = onSchedule(
           if (added) chased++;
         }
         // Chase phase handled; still fall through to court reminders below.
-      } else if (!["retained", "intake_complete", "lost"].includes(d.stage)) {
+      } else if (!["retained", "financed", "intake_complete", "lost"].includes(d.stage)) {
         // --- 2. DECIDE: connected but no decision ---------------------------
         if (openFollowUps.length === 0 && now - lastAttemptTs >= 3 * DAY) {
           const added = await ensureFollowUp(db, lead.id, {

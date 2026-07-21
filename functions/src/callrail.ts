@@ -11,10 +11,12 @@ import { randomUUID } from "node:crypto";
 //   - outbound or answered-inbound  -> appends an auto-logged contact attempt
 //   - missed/voicemail inbound      -> drops a "missed call" post-it on the desk
 //
-// SAFETY: the sync NEVER changes a lead's sales stage — stage moves (pitched,
-// retained, lost, ...) stay human decisions. It only records that phone
-// activity happened, which clears the "uncontacted"/overdue indicators exactly
-// as a manually logged attempt would.
+// SAFETY: stage moves stay human decisions with ONE deliberate exception
+// (approved by the user): when a transcript shows payment actually collected,
+// the sync moves the lead off the working board — paid_full -> intake_complete,
+// paid_partial -> financed — and stamps an audit note on the lead and the
+// attempt. It never touches human-set retained/financed/intake_complete/lost
+// stages, and promised_unpaid (yes, but no money yet) never auto-moves.
 
 const CALLRAIL_API_KEY = defineSecret("CALLRAIL_API_KEY");
 const OPENAI_API_KEY_CR = defineSecret("OPENAI_API_KEY");
@@ -173,6 +175,48 @@ export function saleRollup(
   return patch;
 }
 
+// Stages the classifier may move a lead OUT of when payment is confirmed on a
+// call. Human-set retained/financed/intake_complete/lost are never overridden,
+// and promised_unpaid stays on the board under the gold ribbon (no money yet).
+const AUTO_MOVE_FROM = ["new", "callback", "pitched", "attorney_call", "nurture"];
+
+// The one sanctioned automatic stage move: transcript shows money collected.
+// paid_full -> intake_complete (handed off), paid_partial -> financed (paying).
+// Returns the lead patch plus the audit note to stamp on the attempt.
+export function autoStageMove(
+  d: Record<string, unknown>,
+  analysis: CallAnalysis,
+  callTs: number,
+): { patch: Record<string, unknown>; note: string } | null {
+  if (analysis.saleStatus !== "paid_full" && analysis.saleStatus !== "paid_partial") return null;
+  if (!AUTO_MOVE_FROM.includes(d.stage as string)) return null;
+  const to = analysis.saleStatus === "paid_full" ? "intake_complete" : "financed";
+  const label = to === "intake_complete" ? "Intake Complete" : "Financed";
+  const day = new Date(callTs).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "America/Chicago",
+  });
+  const note = `Stage moved to ${label} by classifier — payment confirmed on ${day} call`;
+  const now = Date.now();
+  const followUps = Array.isArray(d.followUps) ? (d.followUps as Record<string, unknown>[]) : [];
+  const patch: Record<string, unknown> = {
+    stage: to,
+    retainedAt: (d.retainedAt as number) ?? callTs,
+    autoStageNote: note,
+    autoStageAt: now,
+    // Money collected — sales follow-ups no longer apply; close them so they
+    // don't linger on the calendar / Today queue.
+    followUps: followUps.map((f) => (f.done ? f : { ...f, done: true, doneAt: now })),
+  };
+  if (to === "financed") patch.isFinanced = true;
+  if (to === "intake_complete") {
+    patch.intakeComplete = true;
+    patch.intakeCompleteAt = now;
+  }
+  return { patch, note };
+}
+
 function fmtDuration(sec: number | null): string {
   if (!sec) return "";
   const m = Math.floor(sec / 60);
@@ -219,7 +263,7 @@ export async function ensureFollowUp(
     if (!snap.exists) return;
     const d = snap.data()!;
     // Don't chase decided leads.
-    if (["retained", "intake_complete", "lost"].includes(d.stage) || d.deletedAt) return;
+    if (["retained", "financed", "intake_complete", "lost"].includes(d.stage) || d.deletedAt) return;
     const followUps = Array.isArray(d.followUps) ? d.followUps : [];
     const dupe = followUps.some(
       (f: { done?: boolean; dueAt?: number }) =>
@@ -382,7 +426,6 @@ export const syncCallRail = onSchedule(
       // answered/voicemail flags, using the SAME outcome values as the manual
       // "Log a Call" decision tree (spoke / thinking / declined / retained)
       // so auto-logged and hand-logged calls line up on the timeline.
-      // Stage is intentionally untouched either way.
       const outcome = outcomeFor(call, analysis);
 
       const dir = call.direction === "inbound" ? "Inbound" : "Outbound";
@@ -405,27 +448,46 @@ export const syncCallRail = onSchedule(
         durationSec: call.duration ?? null,
         ...(analysis ? { ai: analysis as unknown as Record<string, unknown> } : {}),
       };
+      let movedTo: string | null = null;
       await db.runTransaction(async (tx) => {
         const ref = db.collection("leads").doc(lead.id);
         const snap = await tx.get(ref);
         if (!snap.exists) return;
         const d = snap.data()!;
         const attempts = Array.isArray(d.contactAttempts) ? d.contactAttempts : [];
+        // Payment confirmed on the transcript moves the lead off the working
+        // board (the one sanctioned auto-move) — the audit note lands on both
+        // the lead and this attempt's timeline entry.
+        const move = analysis ? autoStageMove(d, analysis, startedAt) : null;
+        const attemptFinal = move
+          ? { ...attempt, notes: `${attempt.notes} → ${move.note}.` }
+          : attempt;
         const patch: Record<string, unknown> = {
-          contactAttempts: [...attempts, attempt],
+          contactAttempts: [...attempts, attemptFinal],
           updatedAt: Date.now(),
         };
         // A real conversation stamps the lead as connected — the cadence sweep
         // uses this to stop the daily chase.
         if (CONVERSATION_OUTCOMES.includes(outcome)) patch.lastConnectedAt = startedAt;
-        // Sale rollup: promised money or collected money changes the lead's
-        // billing state (never its sales stage).
+        // Sale rollup: promised or collected money updates the lead's billing state.
         if (analysis) {
           const sale = saleRollup(d, analysis, startedAt);
           if (sale) Object.assign(patch, sale);
         }
+        if (move) {
+          Object.assign(patch, move.patch);
+          movedTo = move.patch.stage as string;
+        }
         tx.update(ref, patch);
       });
+      if (movedTo) {
+        logger.info("Auto-moved lead stage on confirmed payment", {
+          leadId: lead.id,
+          name: lead.name,
+          to: movedTo,
+          callId: call.id,
+        });
+      }
 
       // A fresh verbal yes goes straight onto the billing track: collect while
       // the commitment is hot instead of waiting for tomorrow's sweep.

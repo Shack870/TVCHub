@@ -95,7 +95,8 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
   // The outcome bar is contextual to where the lead sits in its lifecycle, so
   // you can't (e.g.) decline a client who's already retained or handed off.
   const isActive = isActiveLead(lead);
-  const isRetained = lead.stage === 'retained';
+  // Financed clients get the same drawer actions as retained (they've hired us).
+  const isRetained = lead.stage === 'retained' || lead.stage === 'financed';
   const isCompleted = lead.stage === 'intake_complete';
   const isLost = lead.stage === 'lost';
   const courtOverdue =
@@ -179,6 +180,11 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
               </a>
             )}
           </div>
+          {lead.autoStageNote && (
+            <p className="data mt-1 text-[11px] italic text-amber-200/80" title="Automatic stage move — audit trail">
+              🤖 {lead.autoStageNote}
+            </p>
+          )}
         </div>
         <div className="flex flex-col items-end gap-2">
           <button className="btn-ghost text-manila" onClick={onClose}>

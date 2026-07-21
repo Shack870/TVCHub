@@ -8,6 +8,7 @@ export type Stage =
   | 'attorney_call' // requested to speak with an attorney, call scheduled
   | 'nurture' // declined / thinking -> sales command center follow-ups
   | 'retained' // hired us
+  | 'financed' // hired us on a payment plan — actively paying, not paid off
   | 'intake_complete' // handed off to the next department
   | 'lost'; // dead / unreachable / not interested — terminal, off the board
 
@@ -211,6 +212,9 @@ export interface Lead {
   salePromisedAt?: number | null; // when the verbal yes happened
   saleAmount?: number | null; // dollar figure quoted/collected, when known
   saleEscalatedAt?: number | null; // billing cadence raised the decision post-it
+  // Audit trail for automatic stage moves (classifier-confirmed payments).
+  autoStageNote?: string | null;
+  autoStageAt?: number | null;
 
   // --- Ownership ---
   owner?: string | null; // display label of the operator who owns this lead

@@ -123,8 +123,12 @@ function FinanceCard({
         <button className="min-w-0 text-left" onClick={onOpenDetail}>
           <h3 className="font-hand text-2xl ink hover:underline">{lead.name}</h3>
           <p className="font-type text-xs text-pad-inkSoft">
-            {lead.intakeComplete ? 'Intake complete' : 'Retained'} · TVC #
-            {lead.tvcCaseNumber || '—'}
+            {lead.stage === 'financed'
+              ? 'Financed — paying'
+              : lead.intakeComplete
+                ? 'Intake complete'
+                : 'Retained'}{' '}
+            · TVC #{lead.tvcCaseNumber || '—'}
           </p>
         </button>
         <div className="flex shrink-0 flex-col items-end gap-1">
