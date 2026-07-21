@@ -5,6 +5,14 @@ import { fmtDate, daysUntilCourt, fmtAppeared, weekdayColor } from '../lib/dates
 import { isActiveLead, isContactOverdue, STAGE_LABELS } from '../lib/leadFlow';
 import { Badge } from './ui/Badge';
 
+function PhoneGlyph({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden>
+      <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.7.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.5.6 3.7.1.3 0 .7-.2 1l-2.3 2.1z" />
+    </svg>
+  );
+}
+
 function stageTone(stage: Lead['stage']) {
   switch (stage) {
     case 'new':
@@ -51,6 +59,12 @@ export function NotepadCard({
   const resent =
     (lead.lastReferralAt ?? 0) - appearedAt > 3600000 &&
     (lead.contactAttempts?.length ?? 0) === 0;
+
+  // CallRail-verified phone activity — shown as a game-style HUD counter that
+  // glows while there's been a call in the last 24h.
+  const calls = (lead.contactAttempts ?? []).filter((a) => a.via === 'callrail');
+  const lastCallTs = calls.reduce((m, a) => Math.max(m, a.ts), 0);
+  const freshCall = now - lastCallTs < 86400000;
 
   return (
     <motion.div
@@ -116,6 +130,24 @@ export function NotepadCard({
             </h3>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-1">
+            {calls.length > 0 && (
+              <span
+                title={`${calls.length} call${calls.length === 1 ? '' : 's'} verified by CallRail`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-sky-900/30 bg-gradient-to-b from-sky-500 to-sky-700 py-0.5 pl-1 pr-2.5 shadow-md"
+                style={
+                  freshCall
+                    ? { boxShadow: '0 0 10px 2px rgba(56,146,220,0.65)' }
+                    : undefined
+                }
+              >
+                <span className="flex h-4 w-4 items-center justify-center rounded-full bg-gradient-to-b from-amber-300 to-amber-500 shadow-inner">
+                  <PhoneGlyph className="h-2.5 w-2.5 text-sky-900" />
+                </span>
+                <span className="font-type text-[11px] font-bold leading-none text-white drop-shadow">
+                  ×{calls.length}
+                </span>
+              </span>
+            )}
             <Badge tone={stageTone(lead.stage)}>{STAGE_LABELS[lead.stage]}</Badge>
             {lead.needsReview && <Badge tone="amber">Needs review</Badge>}
             {resent && (

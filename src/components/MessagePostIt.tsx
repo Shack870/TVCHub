@@ -11,11 +11,29 @@ function fmtWhen(ms: number): string {
   return `${d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' })} · ${time}`;
 }
 
-// A human note from TVC staff, rendered as a sticky note on the Desk. Clicking
-// it opens a popup to mark it Handled / Unhandled.
+// A ringing-phone glyph that wiggles while the missed call is unhandled.
+function RingingPhone({ still = false }: { still?: boolean }) {
+  return (
+    <motion.span
+      className="inline-block text-yellow-950"
+      animate={still ? undefined : { rotate: [-12, 12, -12] }}
+      transition={still ? undefined : { duration: 0.5, repeat: Infinity, repeatDelay: 1.6 }}
+      aria-hidden
+    >
+      <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
+        <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.7.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.5.6 3.7.1.3 0 .7-.2 1l-2.3 2.1z" />
+      </svg>
+    </motion.span>
+  );
+}
+
+// A note stuck to the Desk: either a human message from TVC staff or a
+// CallRail-detected missed call. Clicking opens a popup to mark it Handled.
 export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: number }) {
   const [open, setOpen] = useState(false);
   const { user } = useAuth();
+
+  const missedCall = msg.kind === 'missed_call';
 
   // Alternate a slight tilt so a row of notes looks hand-stuck, not printed.
   const tilt = index % 2 === 0 ? '-rotate-1' : 'rotate-1';
@@ -25,7 +43,11 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
       Handled
     </span>
   ) : (
-    <span className="rounded-full bg-yellow-400 px-2.5 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-yellow-950 shadow-sm">
+    <span
+      className={`rounded-full bg-yellow-400 px-2.5 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-yellow-950 shadow-sm ${
+        missedCall ? 'animate-pulseRing' : ''
+      }`}
+    >
       Unhandled
     </span>
   );
@@ -43,11 +65,22 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           boxShadow: '2px 4px 10px rgba(0,0,0,0.35)',
         }}
       >
-        {/* tape strip */}
-        <span className="absolute -top-2 left-1/2 h-4 w-16 -translate-x-1/2 rotate-2 bg-white/40 shadow-sm" />
+        {/* tape strip — red for a missed call so it reads as urgent at a glance */}
+        <span
+          className={`absolute -top-2 left-1/2 h-4 w-16 -translate-x-1/2 rotate-2 shadow-sm ${
+            missedCall ? 'bg-red-400/50' : 'bg-white/40'
+          }`}
+        />
+        {/* diagonal rubber stamp, like the card "Contact Overdue" oversight stamp */}
+        {missedCall && !msg.handled && (
+          <span className="stamp pointer-events-none absolute right-2 top-9 -rotate-12 text-[11px] text-pad-red">
+            Missed Call
+          </span>
+        )}
         <div className="p-4 pb-3">
           <div className="flex items-start justify-between gap-2">
-            <p className="font-type text-[11px] font-bold uppercase tracking-wide text-yellow-950/80">
+            <p className="flex items-center gap-1.5 font-type text-[11px] font-bold uppercase tracking-wide text-yellow-950/80">
+              {missedCall && <RingingPhone still={msg.handled} />}
               {msg.fromName || 'TVC'}
             </p>
             {statusChip}

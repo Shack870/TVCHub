@@ -1053,10 +1053,18 @@ function ContactLogTab({
                         href={a.recordingUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="ink-link mt-1 inline-block font-type text-xs"
                         onClick={(e) => e.stopPropagation()}
+                        className="mt-1.5 inline-flex items-center gap-1.5 rounded-lg border border-sky-900/30 bg-gradient-to-b from-sky-400 to-sky-600 px-3 py-1 font-type text-xs font-bold uppercase tracking-wide text-white shadow-[0_2px_0_rgba(12,74,110,0.8),0_3px_6px_rgba(0,0,0,0.25)] transition hover:from-sky-300 hover:to-sky-500 active:translate-y-px active:shadow-[0_1px_0_rgba(12,74,110,0.8)]"
                       >
-                        ▶ Listen to recording
+                        <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white/90 text-[8px] leading-none text-sky-700">
+                          ▶
+                        </span>
+                        Play Call
+                        {typeof a.durationSec === 'number' && a.durationSec > 0 && (
+                          <span className="rounded bg-sky-900/40 px-1.5 py-0.5 text-[10px] normal-case tracking-normal">
+                            {Math.floor(a.durationSec / 60)}m {a.durationSec % 60}s
+                          </span>
+                        )}
                       </a>
                     )}
                     {a.by && (

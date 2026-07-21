@@ -227,6 +227,11 @@ export interface AppUser {
 // function; the app only toggles `handled`.
 export interface TvcMessage {
   id: string;
+  // 'tvc_message' = human note from TVC staff; 'missed_call' = CallRail-detected
+  // missed inbound call from a lead.
+  kind?: 'tvc_message' | 'missed_call';
+  leadId?: string | null;
+  callrailCallId?: string | null;
   from: string;
   fromName: string;
   subject?: string | null;
