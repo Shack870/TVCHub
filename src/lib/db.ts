@@ -32,7 +32,7 @@ const LEADS_LIMIT = 5000;
 
 export function watchLeads(
   cb: (leads: Lead[], capped: boolean) => void,
-  onError?: (msg: string) => void,
+  onError?: (msg: string, code?: string) => void,
 ): () => void {
   const q = query(
     collection(db, LEADS),
@@ -51,7 +51,7 @@ export function watchLeads(
     },
     (err) => {
       console.error('watchLeads error', err);
-      onError?.(errMsg(err));
+      onError?.(errMsg(err), err.code);
     },
   );
 }

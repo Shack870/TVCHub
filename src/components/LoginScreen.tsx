@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { consumeSessionExpiredNotice } from '../lib/session';
 
 export function LoginScreen() {
   const { signIn, configured } = useAuth();
@@ -7,6 +8,8 @@ export function LoginScreen() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Read once on mount (lazy initializer) — consuming clears the flag.
+  const [sessionExpired] = useState(consumeSessionExpiredNotice);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,6 +43,11 @@ export function LoginScreen() {
             </div>
           ) : (
             <form onSubmit={submit} className="space-y-3 font-type text-sm">
+              {sessionExpired && (
+                <p className="rounded-md bg-pad-red/10 p-2 text-xs text-pad-ink">
+                  Your session expired — please sign in again.
+                </p>
+              )}
               <label className="block">
                 <span className="field-label">Email</span>
                 <input

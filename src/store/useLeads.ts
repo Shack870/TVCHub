@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import type { Lead } from '../types';
 import { watchLeads } from '../lib/db';
 import { announceNewLeads } from '../lib/leadAlerts';
+import { recoverFromPermissionDenied } from '../lib/session';
 
 interface LeadState {
   leads: Lead[];
@@ -30,8 +31,6 @@ export const useLeadStore = create<LeadState>((set) => ({
   setSubscribed: (subscribed) => set({ subscribed }),
 }));
 
-let unsub: (() => void) | null = null;
-
 // Call once (from an authenticated shell) to begin the realtime subscription.
 export function useLeadsSubscription(enabled: boolean): void {
   const setLeads = useLeadStore((s) => s.setLeads);
@@ -41,13 +40,44 @@ export function useLeadsSubscription(enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
     setSubscribed(true);
+    let disposed = false;
+    let retried = false;
+    let unsub: (() => void) | null = null;
+
+    const subscribe = () => {
+      unsub = watchLeads(setLeads, (msg, code) => {
+        // permission-denied while the UI thinks we're signed in usually means
+        // the persisted auth session went stale after a reload. Try to refresh
+        // the token and resubscribe once; if the session is truly dead the
+        // recovery signs us out and the auth gate shows the login screen —
+        // no error banner needed in that case.
+        if (code === 'permission-denied') {
+          void recoverFromPermissionDenied().then((outcome) => {
+            if (disposed) return;
+            if (outcome === 'retry' && !retried) {
+              retried = true;
+              unsub?.();
+              subscribe();
+              return;
+            }
+            if (outcome === 'signed-out') return;
+            // Token is fine but rules still deny — a genuine access problem.
+            setError(msg);
+          });
+          return;
+        }
+        setError(msg);
+      });
+    };
+
     try {
-      unsub = watchLeads(setLeads, setError);
+      subscribe();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load leads');
     }
     return () => {
-      if (unsub) unsub();
+      disposed = true;
+      unsub?.();
       unsub = null;
       setSubscribed(false);
     };
