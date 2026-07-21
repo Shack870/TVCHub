@@ -242,16 +242,18 @@ function VBars({
   if (!hasData) {
     return <p className="py-10 text-center font-type text-sm text-manila/40">{empty}</p>;
   }
+  // Pixel heights, not percentages: a % height can't resolve against the
+  // auto-height flex column, which collapsed every bar to its minimum.
+  const MAX_BAR_PX = 128;
   return (
     <div className="flex h-44 items-end justify-between gap-2">
       {bars.map((b, i) => (
-        <div key={i} className="flex flex-1 flex-col items-center gap-1">
+        <div key={i} className="flex flex-1 flex-col items-center justify-end gap-1">
           <span className="data text-xs font-semibold text-white">{b.value || ''}</span>
           <div
             className="w-full rounded-t-md transition-all"
             style={{
-              height: `${(b.value / max) * 100}%`,
-              minHeight: b.value > 0 ? 4 : 0,
+              height: Math.max(b.value > 0 ? 4 : 0, Math.round((b.value / max) * MAX_BAR_PX)),
               backgroundColor: color,
             }}
           />
