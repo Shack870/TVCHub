@@ -17,9 +17,15 @@ export type ContactOutcome =
   | 'spoke'
   | 'declined'
   | 'thinking'
+  | 'verbal_yes' // said yes on the call, but payment wasn't collected
   | 'wants_attorney'
   | 'retained'
   | 'lost';
+
+// Sale detection rolled up from call-transcript analysis. "promised_unpaid"
+// is the money-on-the-table state: they agreed to buy but no payment was
+// taken on the call — needs a billing follow-up, not another pitch.
+export type SaleStatus = 'none' | 'paid_full' | 'paid_partial' | 'promised_unpaid';
 
 export type FollowUpType =
   | 'callback'
@@ -27,7 +33,8 @@ export type FollowUpType =
   | 'week_before'
   | 'day_before'
   | 'warrant'
-  | 'attorney';
+  | 'attorney'
+  | 'billing'; // collect a payment that was promised on a call
 
 export type CheckStatus = 'pending' | 'clear' | 'conflict';
 
@@ -50,6 +57,12 @@ export interface ContactAttempt {
     commitments: string[];
     callbackAt: string | null;
     upset: boolean;
+    // Sale block: "bought" only counts as paid when the transcript shows
+    // payment actually being taken on the call.
+    saleStatus?: SaleStatus;
+    saleAmount?: number | null;
+    paymentPlan?: 'full' | 'financed' | 'unknown';
+    paymentPromise?: string | null;
   };
 }
 
@@ -190,6 +203,14 @@ export interface Lead {
   lastConnectedAt?: number | null; // last real two-way conversation
   cadenceExhaustedAt?: number | null; // chase gave up after max attempts
   courtPassedNotifiedAt?: number | null; // court date passed while undecided
+
+  // Sale rollup from call analysis (see functions/src/callrail.ts). The
+  // promised_unpaid state drives the gold "SAID YES · COLLECT" treatment.
+  saleStatus?: SaleStatus | null;
+  saleStatusAt?: number | null; // ts of the call/action that set saleStatus
+  salePromisedAt?: number | null; // when the verbal yes happened
+  saleAmount?: number | null; // dollar figure quoted/collected, when known
+  saleEscalatedAt?: number | null; // billing cadence raised the decision post-it
 
   // --- Ownership ---
   owner?: string | null; // display label of the operator who owns this lead

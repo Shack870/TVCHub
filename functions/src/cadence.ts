@@ -15,6 +15,10 @@ import { ensureFollowUp } from "./callrail.js";
 //   3. REMARKET — any active unsold lead with a future court date gets free
 //      court-reminder touches at 7 days and 1 day out; if the court date
 //      passes with no decision, a post-it asks for the write-off call.
+//   0. BILLING (hottest track, runs before the others) — a lead who said YES
+//      on a call but didn't pay (saleStatus promised_unpaid) gets a same-day
+//      collect-payment follow-up, then one every 2 days. After 3 collection
+//      attempts or 7 days unpaid, a decision post-it goes on the desk.
 //
 // The sweep only ever ADDS follow-ups when a lead has nothing scheduled, and
 // never changes stage — humans decide outcomes; this just prevents silence.
@@ -64,6 +68,7 @@ export const cadenceSweep = onSchedule(
     let nudged = 0;
     let reminders = 0;
     let flagged = 0;
+    let billing = 0;
 
     for (const doc of snap.docs) {
       const d = doc.data();
@@ -87,8 +92,40 @@ export const cadenceSweep = onSchedule(
           ),
         );
 
-      // --- 1. CHASE: no conversation yet -----------------------------------
-      if (!connected) {
+      // --- 0. BILLING: they said yes but haven't paid ------------------------
+      // Hottest track — the pitch is done and money was promised, so nothing
+      // else (chase/nudge) applies while this is open.
+      if (d.saleStatus === "promised_unpaid") {
+        const promisedAt = (d.salePromisedAt as number) || (d.saleStatusAt as number) || now;
+        const collectionAttempts = attempts.filter((a) => (a.ts ?? 0) > promisedAt).length;
+        const openBilling = openFollowUps.some((f) => f.type === "billing");
+
+        if (!d.saleEscalatedAt && (collectionAttempts >= 3 || now - promisedAt >= 7 * DAY)) {
+          // Money has been on the table too long — put the decision on the desk.
+          await doc.ref.update({ saleEscalatedAt: now, updatedAt: now });
+          const amt = d.saleAmount ? `$${d.saleAmount}` : "payment";
+          await postIt(
+            db,
+            lead,
+            `Promised ${amt} never collected: ${lead.name}`,
+            `Said yes on ${new Date(promisedAt).toLocaleDateString("en-US")} but ${amt} was never collected` +
+              ` (${collectionAttempts} collection attempt${collectionAttempts === 1 ? "" : "s"} since).` +
+              ` Decide: keep collecting, re-pitch, or release the file.`,
+          );
+          flagged++;
+        } else if (!openBilling && (collectionAttempts === 0 || now - lastAttemptTs >= 2 * DAY)) {
+          const amt = d.saleAmount ? ` ($${d.saleAmount} promised)` : "";
+          const added = await ensureFollowUp(db, lead.id, {
+            dueAt: now,
+            note: `Collect payment — said YES${amt}, still unpaid`,
+            withinMs: 12 * 3600_000,
+            type: "billing",
+          });
+          if (added) billing++;
+        }
+        // Billing owns this lead's cadence; court reminders still apply below.
+      } else if (!connected) {
+        // --- 1. CHASE: no conversation yet -----------------------------------
         const gap = chaseGapDays(attempts.length);
         if (gap === null) {
           // Exhausted. Flag once; court reminders (below) keep running.
@@ -180,6 +217,7 @@ export const cadenceSweep = onSchedule(
 
     logger.info("Cadence sweep complete", {
       activeLeads: snap.size,
+      billingFollowUps: billing,
       chaseCallbacks: chased,
       undecidedNudges: nudged,
       courtReminders: reminders,

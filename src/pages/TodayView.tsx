@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import type { FollowUp, Lead } from '../types';
-import { balanceOf, isActiveLead, isFinancingClient } from '../lib/leadFlow';
+import { balanceOf, isActiveLead, isFinancingClient, isSalePending } from '../lib/leadFlow';
 import { DAY } from '../lib/followups';
 import { courtDatePassed, fmtMoney, paymentPastDue } from '../lib/dates';
 import { completeFollowUp } from '../lib/actions';
@@ -15,6 +15,7 @@ const FOLLOWUP_LABELS: Record<FollowUp['type'], string> = {
   day_before: 'Day-before-court call',
   warrant: 'Warrant follow-up',
   attorney: 'Attorney call',
+  billing: 'Collect promised payment',
 };
 
 interface Task {
@@ -47,6 +48,7 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
   // so nobody is shown (or counted) more than once. Buckets are ordered by
   // urgency; the first match wins.
   const buckets = useMemo(() => {
+    const moneyOnTable: Task[] = [];
     const courtPassed: Task[] = [];
     const collections: Task[] = [];
     const overdue: Task[] = [];
@@ -60,6 +62,19 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
     for (const l of leads) {
       const active = isActiveLead(l);
 
+      // 0. Money on the table — said yes on a call, payment never collected.
+      //    The pitch is already won; these calls come before everything else.
+      if (isSalePending(l)) {
+        const promisedAt = l.salePromisedAt ?? l.saleStatusAt ?? null;
+        const since = promisedAt ? agingLabel(now - promisedAt) : null;
+        const bits = [
+          l.saleAmount ? `${fmtMoney(l.saleAmount)} promised` : 'Payment promised',
+          since ? `${since} ago` : null,
+          l.nextCourtDate ? `court ${l.nextCourtDate}` : null,
+        ].filter(Boolean);
+        moneyOnTable.push({ lead: l, why: `Said yes — ${bits.join(' · ')}` });
+        continue;
+      }
       // 1. Court date passed (live or retained case) — must be resolved.
       if ((active || l.stage === 'retained') && !l.caseDismissed && courtDatePassed(l)) {
         courtPassed.push({ lead: l, why: 'Court date has passed — set a new date or mark dismissed' });
@@ -100,15 +115,27 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
       // Otherwise: contacted with a follow-up scheduled for a future day — nothing due now.
     }
 
+    // Oldest promise first — that money has been waiting the longest.
+    moneyOnTable.sort(
+      (a, b) =>
+        (a.lead.salePromisedAt ?? a.lead.saleStatusAt ?? 0) -
+        (b.lead.salePromisedAt ?? b.lead.saleStatusAt ?? 0),
+    );
     collections.sort((a, b) => balanceOf(b.lead) - balanceOf(a.lead));
     uncontacted.sort(
       (a, b) => (a.lead.receivedAt ?? a.lead.createdAt) - (b.lead.receivedAt ?? b.lead.createdAt),
     );
 
-    return { courtPassed, collections, overdue, dueToday, uncontacted, stalled };
+    return { moneyOnTable, courtPassed, collections, overdue, dueToday, uncontacted, stalled };
   }, [leads, now, todayStart, todayEnd]);
 
+  const promisedTotal = buckets.moneyOnTable.reduce(
+    (s, t) => s + (t.lead.saleAmount ?? 0),
+    0,
+  );
+
   const total =
+    buckets.moneyOnTable.length +
     buckets.courtPassed.length +
     buckets.collections.length +
     buckets.overdue.length +
@@ -146,6 +173,11 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         </div>
       ) : (
         <div className="space-y-5">
+          <MoneyOnTableSection
+            tasks={buckets.moneyOnTable}
+            promisedTotal={promisedTotal}
+            onOpen={selectLead}
+          />
           <Section title="Court date passed" subtitle="Set a new date or mark the case dismissed" tone="red" tasks={buckets.courtPassed} onOpen={selectLead} />
           <Section title="Payment past due" subtitle="Clients behind on a payment plan" tone="red" tasks={buckets.collections} onOpen={selectLead} />
           <Section title="Overdue follow-ups" subtitle="Past their date — do these first" tone="red" tasks={buckets.overdue} onOpen={selectLead} />
@@ -155,6 +187,48 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
     </div>
+  );
+}
+
+// The gold section: verbal yeses whose money was never collected. Rendered
+// with its own treatment (not the generic Section) so the promised total and
+// the "already sold" framing stand apart from ordinary follow-up work.
+function MoneyOnTableSection({
+  tasks,
+  promisedTotal,
+  onOpen,
+}: {
+  tasks: Task[];
+  promisedTotal: number;
+  onOpen: (id: string) => void;
+}) {
+  if (tasks.length === 0) return null;
+  return (
+    <section className="rounded-2xl bg-gradient-to-r from-amber-500/15 via-amber-400/10 to-amber-500/15 p-4 ring-2 ring-amber-400/50">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h2 className="font-hand text-2xl text-amber-300">Money on the Table</h2>
+          <p className="text-manila/60 text-xs">
+            They already said yes — collect before it cools off
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {promisedTotal > 0 && (
+            <span className="rounded-full bg-gradient-to-b from-amber-300 to-amber-500 px-3 py-1 font-type text-sm font-black text-amber-950 shadow">
+              {fmtMoney(promisedTotal)} promised
+            </span>
+          )}
+          <Badge tone="amber" pulse>
+            {tasks.length}
+          </Badge>
+        </div>
+      </div>
+      <ul className="space-y-2">
+        {tasks.map((t) => (
+          <Row key={t.lead.id} task={t} onOpen={onOpen} />
+        ))}
+      </ul>
+    </section>
   );
 }
 

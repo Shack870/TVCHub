@@ -21,10 +21,17 @@ export const OUTCOME_LABELS: Record<ContactOutcome, string> = {
   spoke: 'Spoke With Lead',
   declined: 'Declined',
   thinking: 'Thinking About It',
+  verbal_yes: 'Said Yes — Billing Pending',
   wants_attorney: 'Wants Attorney',
   retained: 'Retained',
   lost: 'No Sale',
 };
+
+// The money-on-the-table state: a verbal yes with no payment collected, on a
+// lead that hasn't actually been retained/closed yet.
+export function isSalePending(lead: Lead): boolean {
+  return lead.saleStatus === 'promised_unpaid' && isActiveLead(lead);
+}
 
 // Leads shown on the main notepad board (active intake, not yet decided/handed off).
 export function isOnBoard(lead: Lead): boolean {
@@ -84,6 +91,9 @@ export function stageForOutcome(outcome: ContactOutcome): Stage {
       return 'callback';
     case 'spoke':
     case 'thinking':
+    // A verbal yes isn't retained until money is collected — the lead stays
+    // pitched with the gold billing treatment driving the collection.
+    case 'verbal_yes':
       return 'pitched';
     case 'wants_attorney':
       return 'attorney_call';

@@ -394,6 +394,25 @@ export async function addWarrantFee(lead: Lead, fee = 500): Promise<void> {
   }));
 }
 
+// --- Sale flag (money on the table) ---
+
+// Human confirmation that a promised payment was collected. Clears the gold
+// "SAID YES · COLLECT" treatment and closes any open billing follow-ups.
+// Stage is untouched — retaining (with the fee) is its own explicit step.
+export async function markSalePaid(lead: Lead, plan?: 'full' | 'financed'): Promise<void> {
+  await mutateLead(lead.id, (fresh) => {
+    const now = Date.now();
+    return {
+      saleStatus: plan === 'financed' ? 'paid_partial' : 'paid_full',
+      saleStatusAt: now,
+      saleEscalatedAt: null,
+      followUps: (fresh.followUps ?? []).map((f) =>
+        !f.done && f.type === 'billing' ? { ...f, done: true, doneAt: now } : f,
+      ),
+    };
+  });
+}
+
 // --- Court date enforcement ---
 
 export async function updateCourtDate(

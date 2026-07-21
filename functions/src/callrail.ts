@@ -36,7 +36,7 @@ interface CrCall {
 
 // What the transcript classifier returns. Everything is advisory: it enriches
 // the contact log and schedules callbacks, but never moves the sales stage.
-interface CallAnalysis {
+export interface CallAnalysis {
   connection: "conversation" | "brief" | "voicemail" | "wrong_number" | "unclear";
   pitched: boolean;
   pitchResult: "bought" | "declined" | "thinking" | "not_pitched";
@@ -44,9 +44,15 @@ interface CallAnalysis {
   commitments: string[];
   callbackAt: string | null; // ISO date if a specific callback was agreed
   upset: boolean;
+  // Sale block. "promised_unpaid" (a verbal yes with no payment taken on the
+  // call) is the money-on-the-table state that drives the billing cadence.
+  saleStatus: "none" | "paid_full" | "paid_partial" | "promised_unpaid";
+  saleAmount: number | null;
+  paymentPlan: "full" | "financed" | "unknown";
+  paymentPromise: string | null;
 }
 
-const ANALYSIS_SYSTEM = `You analyze a phone call transcript between a law firm (Agent) and a traffic-case lead (Caller). The firm's funnel is: reach the lead ("connect"), pitch representation, then the lead buys, declines, or thinks about it.
+export const ANALYSIS_SYSTEM = `You analyze a phone call transcript between a law firm (Agent) and a traffic-case lead (Caller). The firm's funnel is: reach the lead ("connect"), pitch representation, then the lead buys, declines, or thinks about it.
 Return ONLY a JSON object:
 - "connection": "conversation" (a real two-way exchange), "brief" (answered but no real exchange, e.g. hung up in seconds), "voicemail" (reached voicemail/answering service), "wrong_number", or "unclear".
 - "pitched": true if representation/fees/retainer were discussed as an offer.
@@ -55,6 +61,10 @@ Return ONLY a JSON object:
 - "commitments": array of concrete promises made by either side ("Member emailing signed retainer today", "Agent to confirm fee with Jody"). [] if none.
 - "callbackAt": ISO date (yyyy-mm-dd) ONLY if a specific callback day was agreed, else null.
 - "upset": true if the caller is angry/frustrated with the firm.
+- "saleStatus": "paid_full" (payment for the FULL fee was actually taken on this call — card number read, payment processed/confirmed), "paid_partial" (a partial/first payment was actually taken on this call), "promised_unpaid" (they agreed to buy/retain but NO payment was taken on this call — e.g. "I'll pay Friday", "my boss will pay", "I'll do the DocuSign later"), or "none" (no sale). CRITICAL: a verbal yes does NOT count as paid. Only mark paid_full/paid_partial when the transcript shows money actually changing hands on this call.
+- "saleAmount": the dollar amount quoted or collected as a number (e.g. 1625), or null if no figure was stated.
+- "paymentPlan": "full" (paying in one payment), "financed" (payment plan / installments discussed), or "unknown".
+- "paymentPromise": for promised_unpaid only — a short quote of what they committed to ("will pay Friday after payday"), else null.
 Do not invent facts. If the transcript is empty or useless, use connection "unclear", empty summary.`;
 
 async function analyzeTranscript(
@@ -86,6 +96,7 @@ async function analyzeTranscript(
     };
     if (!res.ok) throw new Error(json.error?.message || `OpenAI ${res.status}`);
     const parsed = JSON.parse(json.choices?.[0]?.message?.content || "{}");
+    const saleAmount = Number(parsed.saleAmount);
     return {
       connection: parsed.connection ?? "unclear",
       pitched: Boolean(parsed.pitched),
@@ -94,6 +105,14 @@ async function analyzeTranscript(
       commitments: Array.isArray(parsed.commitments) ? parsed.commitments.map(String) : [],
       callbackAt: parsed.callbackAt || null,
       upset: Boolean(parsed.upset),
+      saleStatus: ["paid_full", "paid_partial", "promised_unpaid"].includes(parsed.saleStatus)
+        ? parsed.saleStatus
+        : "none",
+      saleAmount: Number.isFinite(saleAmount) && saleAmount > 0 ? saleAmount : null,
+      paymentPlan: ["full", "financed"].includes(parsed.paymentPlan)
+        ? parsed.paymentPlan
+        : "unknown",
+      paymentPromise: parsed.paymentPromise ? String(parsed.paymentPromise) : null,
     };
   } catch (e) {
     logger.warn("Transcript analysis failed; falling back to basic logging", e);
@@ -105,24 +124,53 @@ const last10 = (s: unknown): string =>
   String(s ?? "").replace(/\D/g, "").slice(-10);
 
 // Outcomes that mean a real two-way conversation happened.
-const CONVERSATION_OUTCOMES = ["spoke", "thinking", "declined", "retained"];
+const CONVERSATION_OUTCOMES = ["spoke", "thinking", "declined", "retained", "verbal_yes"];
 
 // Map a call (and its transcript analysis) onto the same ContactOutcome values
 // the manual decision tree uses, so the timeline reads consistently whether a
 // call was hand-logged or auto-logged.
-function outcomeFor(call: CrCall, analysis: CallAnalysis | null): string {
+export function outcomeFor(call: CrCall, analysis: CallAnalysis | null): string {
   if (analysis && analysis.connection !== "unclear") {
     if (analysis.connection === "voicemail") return "voicemail";
     if (analysis.connection !== "conversation") return "no_answer"; // brief / wrong number
     // A real conversation: refine by pitch result when the transcript shows one.
     if (analysis.pitched) {
-      if (analysis.pitchResult === "bought") return "retained";
+      if (analysis.pitchResult === "bought") {
+        // A yes only counts as retained when money actually moved on the call;
+        // a verbal yes with no payment is its own money-on-the-table state.
+        return analysis.saleStatus === "promised_unpaid" ? "verbal_yes" : "retained";
+      }
       if (analysis.pitchResult === "declined") return "declined";
       if (analysis.pitchResult === "thinking") return "thinking";
     }
     return "spoke";
   }
   return call.voicemail ? "voicemail" : call.answered ? "spoke" : "no_answer";
+}
+
+// Roll a call's sale read up onto the lead. Only evidence NEWER than what's
+// already recorded can change the state, and a human-set paid state is never
+// downgraded by an older call arriving late from the API.
+export function saleRollup(
+  d: Record<string, unknown>,
+  analysis: CallAnalysis,
+  callTs: number,
+): Record<string, unknown> | null {
+  if (analysis.saleStatus === "none") return null;
+  const prevAt = (d.saleStatusAt as number) ?? 0;
+  if (callTs <= prevAt) return null;
+  const patch: Record<string, unknown> = {
+    saleStatus: analysis.saleStatus,
+    saleStatusAt: callTs,
+  };
+  if (analysis.saleAmount) patch.saleAmount = analysis.saleAmount;
+  if (analysis.saleStatus === "promised_unpaid") {
+    patch.salePromisedAt = callTs;
+  } else {
+    // Paid (full or partial) clears the promised flag and its escalation.
+    patch.saleEscalatedAt = null;
+  }
+  return patch;
 }
 
 function fmtDuration(sec: number | null): string {
@@ -370,8 +418,28 @@ export const syncCallRail = onSchedule(
         // A real conversation stamps the lead as connected — the cadence sweep
         // uses this to stop the daily chase.
         if (CONVERSATION_OUTCOMES.includes(outcome)) patch.lastConnectedAt = startedAt;
+        // Sale rollup: promised money or collected money changes the lead's
+        // billing state (never its sales stage).
+        if (analysis) {
+          const sale = saleRollup(d, analysis, startedAt);
+          if (sale) Object.assign(patch, sale);
+        }
         tx.update(ref, patch);
       });
+
+      // A fresh verbal yes goes straight onto the billing track: collect while
+      // the commitment is hot instead of waiting for tomorrow's sweep.
+      if (analysis?.saleStatus === "promised_unpaid") {
+        await ensureFollowUp(db, lead.id, {
+          dueAt: Date.now(),
+          note:
+            `Collect payment — said YES on the call` +
+            (analysis.saleAmount ? ` ($${analysis.saleAmount} promised)` : "") +
+            (analysis.paymentPromise ? ` — "${analysis.paymentPromise}"` : ""),
+          withinMs: 12 * 3600_000,
+          type: "billing",
+        });
+      }
 
       // We called them back (any outbound attempt), or they got through to us
       // (inbound conversation) — the missed-call post-it has served its

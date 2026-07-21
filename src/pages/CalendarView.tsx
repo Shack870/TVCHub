@@ -34,6 +34,7 @@ const FOLLOWUP_LABEL: Record<FollowUpType, string> = {
   day_before: 'Day before court',
   warrant: 'Warrant',
   attorney: 'Attorney call',
+  billing: 'Collect payment',
 };
 
 function leadEvents(lead: Lead): CalEvent[] {

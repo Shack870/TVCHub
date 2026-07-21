@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import type { Lead } from '../types';
 import { fmtDate, daysUntilCourt, fmtAppeared, weekdayColor } from '../lib/dates';
-import { isActiveLead, isContactOverdue, STAGE_LABELS } from '../lib/leadFlow';
+import { isActiveLead, isContactOverdue, isSalePending, STAGE_LABELS } from '../lib/leadFlow';
 import { Badge } from './ui/Badge';
 
 function PhoneGlyph({ className }: { className?: string }) {
@@ -66,14 +66,37 @@ export function NotepadCard({
   const lastCallTs = calls.reduce((m, a) => Math.max(m, a.ts), 0);
   const freshCall = now - lastCallTs < 86400000;
 
+  // Money on the table: they said yes on a call but payment was never taken.
+  // Gold treatment — louder than anything else, because the pitch is already
+  // won and only collection remains.
+  const salePending = isSalePending(lead);
+  const promiseDays = salePending
+    ? Math.floor((now - (lead.salePromisedAt ?? lead.saleStatusAt ?? now)) / 86400000)
+    : 0;
+
   return (
     <motion.div
       whileHover={{ y: -3 }}
       transition={{ duration: 0.12 }}
       className={`legal-pad group relative block w-full overflow-hidden rounded-lg text-left shadow-card ring-1 ring-black/10 ${
-        overdue ? 'ring-2 ring-pad-red/70' : ''
+        salePending ? 'ring-2 ring-amber-500/80' : overdue ? 'ring-2 ring-pad-red/70' : ''
       } ${big ? 'min-h-[460px]' : 'min-h-[230px]'}`}
     >
+      {/* Gold corner ribbon — a verbal yes with money still uncollected. */}
+      {salePending && (
+        <div className="pointer-events-none absolute -right-10 top-4 z-20 w-40 rotate-45">
+          <div className="animate-pulse bg-gradient-to-b from-amber-300 via-amber-400 to-amber-600 py-1 text-center shadow-[0_2px_6px_rgba(0,0,0,0.4)] ring-1 ring-amber-900/40">
+            <p className="font-type text-[9px] font-black uppercase leading-tight tracking-widest text-amber-950 drop-shadow-sm">
+              Said Yes
+            </p>
+            <p className="font-type text-[8px] font-bold uppercase leading-tight tracking-wide text-amber-900/90">
+              collect{lead.saleAmount ? ` $${lead.saleAmount}` : ''}
+              {promiseDays > 0 ? ` · ${promiseDays}d` : ''}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* top binding strip with holes */}
       <div className="pad-binding flex h-7 items-center gap-6 px-12">
         {Array.from({ length: 7 }).map((_, i) => (

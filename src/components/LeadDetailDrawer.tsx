@@ -9,7 +9,7 @@ import { useLead } from '../store/useLeads';
 import { useAuth } from '../context/AuthContext';
 import type { ContactOutcome, Lead, Ticket } from '../types';
 import { formatDistanceToNow } from 'date-fns';
-import { balanceOf, isActiveLead, isContactOverdue, OUTCOME_LABELS, STAGE_LABELS } from '../lib/leadFlow';
+import { balanceOf, isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, STAGE_LABELS } from '../lib/leadFlow';
 import { courtDatePassed, fmtDate, fmtMoney } from '../lib/dates';
 import { updateLead, updateLeadGuarded } from '../lib/db';
 import { notify } from '../store/useToast';
@@ -22,6 +22,7 @@ import {
   markCaseDismissed,
   markIntakeComplete,
   markLost,
+  markSalePaid,
   recordPayment,
   reopenIntake,
   restoreLead,
@@ -191,6 +192,15 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
           )}
         </div>
       </div>
+
+      {/* Money on the table — a verbal yes with payment never collected. */}
+      {isSalePending(lead) && (
+        <SalePendingBanner
+          lead={lead}
+          onLogCall={() => setTopTab('contact')}
+          onRetain={() => setRetainOpen(true)}
+        />
+      )}
 
       {/* Top tabs */}
       <div className="flex gap-1 px-4">
@@ -952,6 +962,7 @@ const OUTCOME_META: Record<ContactOutcome, { color: string }> = {
   voicemail: { color: '#e0a52f' },
   spoke: { color: '#2f8f4e' },
   thinking: { color: '#2f74c0' },
+  verbal_yes: { color: '#b8860b' }, // gold — money promised, not collected
   wants_attorney: { color: '#7c4dbd' },
   declined: { color: '#b5302a' },
   retained: { color: '#0d8f86' },
@@ -1065,6 +1076,17 @@ function ContactLogTab({
                                     : 'Pitched'}
                             </span>
                           )}
+                          {a.ai.saleStatus === 'promised_unpaid' && (
+                            <span className="rounded-full bg-gradient-to-b from-amber-300 to-amber-500 px-2 py-0.5 font-type text-[10px] font-black uppercase tracking-wide text-amber-950 shadow-sm">
+                              Said yes · unpaid{a.ai.saleAmount ? ` · $${a.ai.saleAmount}` : ''}
+                            </span>
+                          )}
+                          {(a.ai.saleStatus === 'paid_full' || a.ai.saleStatus === 'paid_partial') && (
+                            <span className="rounded-full bg-emerald-600/20 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-emerald-900">
+                              {a.ai.saleStatus === 'paid_full' ? 'Paid in full' : 'Payment collected'}
+                              {a.ai.saleAmount ? ` · $${a.ai.saleAmount}` : ''}
+                            </span>
+                          )}
                           {a.ai.upset && (
                             <span className="rounded-full bg-red-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-red-800">
                               Upset caller
@@ -1086,6 +1108,11 @@ function ContactLogTab({
                               </li>
                             ))}
                           </ul>
+                        )}
+                        {a.ai.paymentPromise && (
+                          <p className="mt-1 font-type text-xs font-semibold text-amber-800">
+                            Payment promise: “{a.ai.paymentPromise}”
+                          </p>
                         )}
                         {a.ai.callbackAt && (
                           <p className="mt-1 font-type text-xs font-semibold text-violet-900">
@@ -1503,7 +1530,67 @@ const FOLLOWUP_LABELS: Record<FollowUpType, string> = {
   day_before: 'Day-before-court call',
   warrant: 'Warrant follow-up',
   attorney: 'Attorney call',
+  billing: 'Collect promised payment',
 };
+
+// Gold banner for the money-on-the-table state: they said yes on a call but
+// payment was never taken. Mark Paid confirms collection (and opens the retain
+// modal so the fee gets recorded); Log Billing Call jumps to the contact log.
+function SalePendingBanner({
+  lead,
+  onLogCall,
+  onRetain,
+}: {
+  lead: Lead;
+  onLogCall: () => void;
+  onRetain: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const promisedAt = lead.salePromisedAt ?? lead.saleStatusAt ?? null;
+  const days = promisedAt ? Math.floor((Date.now() - promisedAt) / DAY) : 0;
+
+  const paid = async () => {
+    setBusy(true);
+    try {
+      await markSalePaid(lead);
+      notify.success(`${lead.name} marked paid — record the fee to move them to Retained.`);
+      // The money is in: finish the job by retaining them with the real fee.
+      if (lead.stage !== 'retained' && lead.stage !== 'intake_complete') onRetain();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mx-4 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/60 bg-gradient-to-r from-amber-400/25 via-amber-300/20 to-amber-400/25 px-4 py-2.5">
+      <div className="flex items-center gap-2.5">
+        <span className="animate-pulse rounded bg-gradient-to-b from-amber-300 to-amber-500 px-2 py-1 font-type text-[10px] font-black uppercase tracking-widest text-amber-950 shadow">
+          Said Yes
+        </span>
+        <span className="font-type text-sm font-semibold text-white">
+          Verbal yes{promisedAt ? ` on ${fmtDate(new Date(promisedAt).toISOString().slice(0, 10))}` : ''}
+          {lead.saleAmount ? ` — $${lead.saleAmount.toLocaleString()} promised` : ''}, payment not
+          collected{days > 0 ? ` (${days}d ago)` : ''}.
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded bg-emerald-600 px-2.5 py-1 font-type text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+          disabled={busy}
+          onClick={paid}
+        >
+          ✓ Mark Paid
+        </button>
+        <button
+          className="rounded bg-white/20 px-2.5 py-1 font-type text-xs font-semibold text-white hover:bg-white/30"
+          onClick={onLogCall}
+        >
+          Log Billing Call
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // The designed hard rule, surfaced where the user actually works the client:
 // a passed court date must be replaced or the case dismissed — resolve it inline.
