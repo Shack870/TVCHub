@@ -80,7 +80,12 @@ export const cadenceSweep = onSchedule(
       const openFollowUps = followUps.filter((f) => !f.done);
       const lastAttemptTs = attempts.reduce((m, a) => Math.max(m, a.ts ?? 0), 0);
       const connected =
-        Boolean(d.lastConnectedAt) || attempts.some((a) => a.outcome === "spoke");
+        Boolean(d.lastConnectedAt) ||
+        attempts.some((a) =>
+          ["spoke", "thinking", "declined", "retained", "wants_attorney"].includes(
+            a.outcome ?? "",
+          ),
+        );
 
       // --- 1. CHASE: no conversation yet -----------------------------------
       if (!connected) {

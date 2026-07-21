@@ -104,6 +104,27 @@ async function analyzeTranscript(
 const last10 = (s: unknown): string =>
   String(s ?? "").replace(/\D/g, "").slice(-10);
 
+// Outcomes that mean a real two-way conversation happened.
+const CONVERSATION_OUTCOMES = ["spoke", "thinking", "declined", "retained"];
+
+// Map a call (and its transcript analysis) onto the same ContactOutcome values
+// the manual decision tree uses, so the timeline reads consistently whether a
+// call was hand-logged or auto-logged.
+function outcomeFor(call: CrCall, analysis: CallAnalysis | null): string {
+  if (analysis && analysis.connection !== "unclear") {
+    if (analysis.connection === "voicemail") return "voicemail";
+    if (analysis.connection !== "conversation") return "no_answer"; // brief / wrong number
+    // A real conversation: refine by pitch result when the transcript shows one.
+    if (analysis.pitched) {
+      if (analysis.pitchResult === "bought") return "retained";
+      if (analysis.pitchResult === "declined") return "declined";
+      if (analysis.pitchResult === "thinking") return "thinking";
+    }
+    return "spoke";
+  }
+  return call.voicemail ? "voicemail" : call.answered ? "spoke" : "no_answer";
+}
+
 function fmtDuration(sec: number | null): string {
   if (!sec) return "";
   const m = Math.floor(sec / 60);
@@ -310,18 +331,11 @@ export const syncCallRail = onSchedule(
           : null;
 
       // Outcome: prefer the transcript's read of the call over the raw
-      // answered/voicemail flags. Stage is intentionally untouched either way.
-      let outcome: string;
-      if (analysis && analysis.connection !== "unclear") {
-        outcome =
-          analysis.connection === "conversation"
-            ? "spoke"
-            : analysis.connection === "voicemail"
-              ? "voicemail"
-              : "no_answer"; // brief hang-up / wrong number = not a connection
-      } else {
-        outcome = call.voicemail ? "voicemail" : call.answered ? "spoke" : "no_answer";
-      }
+      // answered/voicemail flags, using the SAME outcome values as the manual
+      // "Log a Call" decision tree (spoke / thinking / declined / retained)
+      // so auto-logged and hand-logged calls line up on the timeline.
+      // Stage is intentionally untouched either way.
+      const outcome = outcomeFor(call, analysis);
 
       const dir = call.direction === "inbound" ? "Inbound" : "Outbound";
       const dur = fmtDuration(call.duration);
@@ -355,14 +369,14 @@ export const syncCallRail = onSchedule(
         };
         // A real conversation stamps the lead as connected — the cadence sweep
         // uses this to stop the daily chase.
-        if (outcome === "spoke") patch.lastConnectedAt = startedAt;
+        if (CONVERSATION_OUTCOMES.includes(outcome)) patch.lastConnectedAt = startedAt;
         tx.update(ref, patch);
       });
 
       // We called them back (any outbound attempt), or they got through to us
       // (inbound conversation) — the missed-call post-it has served its
       // purpose, so take it off the desk automatically.
-      if (call.direction === "outbound" || outcome === "spoke") {
+      if (call.direction === "outbound" || CONVERSATION_OUTCOMES.includes(outcome)) {
         const cleared = await clearMissedCallPostIts(db, lead.id, startedAt);
         if (cleared) {
           logger.info("Cleared missed-call post-its after returned call", {
