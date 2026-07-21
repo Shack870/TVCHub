@@ -157,13 +157,18 @@ export const cadenceSweep = onSchedule(
         } else if (courtMs < now && !d.courtPassedNotifiedAt) {
           // Court date came and went with the lead still undecided.
           await doc.ref.update({ courtPassedNotifiedAt: now, updatedAt: now });
-          await postIt(
-            db,
-            lead,
-            `Court date passed: ${lead.name}`,
-            `Their court date (${courtDate}) has passed and the lead was never retained or written off. Close it out or check how the case went.`,
-          );
-          flagged++;
+          // Only raise a post-it when the date passed recently. Anything older
+          // is historical backlog — flag it silently so the first sweep after
+          // a deploy doesn't flood the desk with dozens of notes at once.
+          if (now - courtMs <= 10 * DAY) {
+            await postIt(
+              db,
+              lead,
+              `Court date passed: ${lead.name}`,
+              `Their court date (${courtDate}) has passed and the lead was never retained or written off. Close it out or check how the case went.`,
+            );
+            flagged++;
+          }
         }
       }
     }
