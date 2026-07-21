@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import type { TvcMessage } from '../types';
+import { isBillingNote } from '../lib/notes';
 import { archiveMessage, setMessageHandled } from '../lib/db';
 import { useAuth } from '../context/AuthContext';
 import { Modal } from './ui/Modal';
@@ -34,6 +35,11 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
   const { user } = useAuth();
 
   const missedCall = msg.kind === 'missed_call';
+  // Uncollected-money escalation — gold, matching the SAID YES ribbon on cards.
+  const billing = isBillingNote(msg);
+  const paper = billing
+    ? 'linear-gradient(180deg, #ffe08a 0%, #f2b13c 100%)'
+    : 'linear-gradient(180deg, #fff9a8 0%, #fdf07e 100%)';
 
   // Alternate a slight tilt so a row of notes looks hand-stuck, not printed.
   const tilt = index % 2 === 0 ? '-rotate-1' : 'rotate-1';
@@ -44,9 +50,9 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
     </span>
   ) : (
     <span
-      className={`rounded-full bg-yellow-400 px-2.5 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-yellow-950 shadow-sm ${
-        missedCall ? 'animate-pulseRing' : ''
-      }`}
+      className={`rounded-full px-2.5 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide shadow-sm ${
+        billing ? 'bg-amber-900 text-amber-100' : 'bg-yellow-400 text-yellow-950'
+      } ${missedCall || billing ? 'animate-pulseRing' : ''}`}
     >
       Unhandled
     </span>
@@ -59,22 +65,29 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
         onClick={() => setOpen(true)}
         whileHover={{ y: -3, rotate: 0 }}
         transition={{ duration: 0.12 }}
-        className={`relative block w-64 shrink-0 cursor-pointer text-left ${tilt}`}
+        className={`relative block w-64 shrink-0 cursor-pointer text-left ${tilt} ${
+          billing && !msg.handled ? 'ring-2 ring-amber-500/80' : ''
+        }`}
         style={{
-          background: 'linear-gradient(180deg, #fff9a8 0%, #fdf07e 100%)',
+          background: paper,
           boxShadow: '2px 4px 10px rgba(0,0,0,0.35)',
         }}
       >
-        {/* tape strip — red for a missed call so it reads as urgent at a glance */}
+        {/* tape strip — red for a missed call, gold for money on the table */}
         <span
           className={`absolute -top-2 left-1/2 h-4 w-16 -translate-x-1/2 rotate-2 shadow-sm ${
-            missedCall ? 'bg-red-400/50' : 'bg-white/40'
+            missedCall ? 'bg-red-400/50' : billing ? 'bg-amber-500/60' : 'bg-white/40'
           }`}
         />
         {/* diagonal rubber stamp, like the card "Contact Overdue" oversight stamp */}
         {missedCall && !msg.handled && (
           <span className="stamp pointer-events-none absolute right-2 top-9 -rotate-12 text-[11px] text-pad-red">
             Missed Call
+          </span>
+        )}
+        {billing && !msg.handled && (
+          <span className="stamp pointer-events-none absolute right-2 top-9 -rotate-12 text-[11px] text-amber-900">
+            $ Collect
           </span>
         )}
         <div className="p-4 pb-3">
@@ -100,10 +113,7 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
       </motion.button>
 
       <Modal open={open} onClose={() => setOpen(false)} width="max-w-md">
-        <div
-          className="rounded-sm p-6 shadow-card"
-          style={{ background: 'linear-gradient(180deg, #fff9a8 0%, #fdf07e 100%)' }}
-        >
+        <div className="rounded-sm p-6 shadow-card" style={{ background: paper }}>
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="font-type text-xs font-bold uppercase tracking-wide text-yellow-950/80">

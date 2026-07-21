@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import { isInitialLead, isPipelineLead } from '../lib/leadFlow';
+import { isBillingNote, isSystemNote } from '../lib/notes';
 import { sendToInitialLeads } from '../lib/actions';
 import { daysUntilCourt } from '../lib/dates';
 import type { Lead } from '../types';
@@ -37,6 +38,47 @@ function matches(l: Lead, q: string): boolean {
   return hay.includes(q.toLowerCase());
 }
 
+// A folder-style tab for the post-it stacks. The unhandled count rides in a
+// pill; a gold pill means an uncollected-money escalation is waiting inside.
+function NoteTab({
+  label,
+  open,
+  active,
+  onClick,
+  gold = false,
+}: {
+  label: string;
+  open: number;
+  active: boolean;
+  onClick: () => void;
+  gold?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-t-lg px-4 py-2 font-type text-[11px] font-bold uppercase tracking-widest transition-colors ${
+        active
+          ? 'bg-black/25 text-manila shadow-inner ring-1 ring-white/10'
+          : 'text-manila/45 hover:bg-black/10 hover:text-manila/70'
+      }`}
+    >
+      {label}
+      {open > 0 && (
+        <span
+          className={`ml-2 rounded-full px-2 py-0.5 text-[10px] font-black ${
+            gold
+              ? 'animate-pulse bg-gradient-to-b from-amber-300 to-amber-500 text-amber-950'
+              : 'bg-yellow-400 text-yellow-950'
+          }`}
+        >
+          {open}
+        </span>
+      )}
+    </button>
+  );
+}
+
 export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const leads = useLeads();
   const selectLead = useUI((s) => s.selectLead);
@@ -50,18 +92,44 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const [backLead, setBackLead] = useState<Lead | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // TVC staff notes stuck to the top of the desk. Unhandled ones stay until
-  // dealt with; handled ones linger a week so you can see what was resolved.
+  // Notes stuck to the top of the desk, in two tabbed stacks: human messages
+  // from TVC staff, and system-generated action items (billing escalations,
+  // cadence decisions, missed calls). Unhandled ones stay until dealt with;
+  // handled ones linger a week so you can see what was resolved.
   const allMessages = useMessages();
-  const notes = useMemo(() => {
+  const [noteTab, setNoteTab] = useState<'tvc' | 'action' | null>(null);
+  const noteTabs = useMemo(() => {
     const weekAgo = Date.now() - 7 * 86400000;
-    return allMessages
+    const visible = allMessages
       .filter((m) => !m.deletedAt)
       .filter((m) => !m.handled || (m.handledAt ?? m.updatedAt) > weekAgo)
-      .sort((a, b) =>
-        a.handled === b.handled ? b.receivedAt - a.receivedAt : a.handled ? 1 : -1,
-      );
+      .sort((a, b) => {
+        if (a.handled !== b.handled) return a.handled ? 1 : -1;
+        // Within unhandled, money-on-the-table escalations float first.
+        const bill = Number(isBillingNote(b)) - Number(isBillingNote(a));
+        return bill !== 0 && !a.handled ? bill : b.receivedAt - a.receivedAt;
+      });
+    const action = visible.filter(isSystemNote);
+    const tvc = visible.filter((m) => !isSystemNote(m));
+    return {
+      action,
+      tvc,
+      actionOpen: action.filter((m) => !m.handled).length,
+      tvcOpen: tvc.filter((m) => !m.handled).length,
+    };
   }, [allMessages]);
+  // Until the user picks a tab, default to wherever the unhandled work is —
+  // Action Items win when both tabs have open notes.
+  const activeNoteTab =
+    noteTab ??
+    (noteTabs.actionOpen > 0
+      ? 'action'
+      : noteTabs.tvcOpen > 0
+        ? 'tvc'
+        : noteTabs.action.length > 0
+          ? 'action'
+          : 'tvc');
+  const notes = activeNoteTab === 'action' ? noteTabs.action : noteTabs.tvc;
 
   const counts = useMemo(
     () => ({
@@ -228,16 +296,36 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
 
       <div className="mb-5">{scopeToggle}</div>
 
-      {notes.length > 0 && (
+      {(noteTabs.tvc.length > 0 || noteTabs.action.length > 0) && (
         <section className="mb-7">
-          <p className="mb-3 text-[11px] uppercase tracking-widest text-manila/50">
-            Messages from TVC
-          </p>
-          <div className="flex gap-5 overflow-x-auto pb-3 pt-2">
-            {notes.map((m, i) => (
-              <MessagePostIt key={m.id} msg={m} index={i} />
-            ))}
+          <div className="mb-3 flex items-center gap-1">
+            <NoteTab
+              label="TVC Messages"
+              open={noteTabs.tvcOpen}
+              active={activeNoteTab === 'tvc'}
+              onClick={() => setNoteTab('tvc')}
+            />
+            <NoteTab
+              label="Action Items"
+              open={noteTabs.actionOpen}
+              active={activeNoteTab === 'action'}
+              onClick={() => setNoteTab('action')}
+              gold={noteTabs.action.some((m) => !m.handled && isBillingNote(m))}
+            />
           </div>
+          {notes.length === 0 ? (
+            <p className="rounded-lg bg-black/15 px-4 py-6 font-type text-xs text-manila/50">
+              {activeNoteTab === 'action'
+                ? 'No action items on the desk.'
+                : 'No messages from TVC on the desk.'}
+            </p>
+          ) : (
+            <div className="flex gap-5 overflow-x-auto pb-3 pt-2">
+              {notes.map((m, i) => (
+                <MessagePostIt key={m.id} msg={m} index={i} />
+              ))}
+            </div>
+          )}
         </section>
       )}
 

@@ -40,9 +40,11 @@ async function postIt(
   lead: { id: string; name: string },
   subject: string,
   message: string,
+  kind: "tvc_message" | "billing_escalation" = "tvc_message",
 ): Promise<void> {
   await db.collection("messages").add({
-    kind: "tvc_message",
+    kind,
+    source: "system",
     from: "TVCHub Cadence",
     fromName: "Cadence Engine",
     subject,
@@ -111,6 +113,7 @@ export const cadenceSweep = onSchedule(
             `Said yes on ${new Date(promisedAt).toLocaleDateString("en-US")} but ${amt} was never collected` +
               ` (${collectionAttempts} collection attempt${collectionAttempts === 1 ? "" : "s"} since).` +
               ` Decide: keep collecting, re-pitch, or release the file.`,
+            "billing_escalation",
           );
           flagged++;
         } else if (!openBilling && (collectionAttempts === 0 || now - lastAttemptTs >= 2 * DAY)) {

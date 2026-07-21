@@ -267,8 +267,12 @@ export interface AppUser {
 export interface TvcMessage {
   id: string;
   // 'tvc_message' = human note from TVC staff; 'missed_call' = CallRail-detected
-  // missed inbound call from a lead.
-  kind?: 'tvc_message' | 'missed_call';
+  // missed inbound call from a lead; 'billing_escalation' = the cadence engine
+  // flagging promised money that was never collected.
+  kind?: 'tvc_message' | 'missed_call' | 'billing_escalation';
+  // Who stuck this note on the desk. Older docs may lack it — the UI falls
+  // back to kind/from heuristics (see noteSplit in NotepadBoard).
+  source?: 'human' | 'system' | null;
   leadId?: string | null;
   callrailCallId?: string | null;
   from: string;

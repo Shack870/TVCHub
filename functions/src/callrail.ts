@@ -381,6 +381,7 @@ export const syncCallRail = onSchedule(
         // a lead calling back and missing us is exactly a "don't drop this".
         await db.collection("messages").add({
           kind: "missed_call",
+          source: "system",
           from: call.customer_phone_number || "",
           fromName: lead.name,
           subject: `Missed call from ${lead.name}`,
@@ -534,6 +535,7 @@ export const syncCallRail = onSchedule(
       if (analysis?.upset) {
         await db.collection("messages").add({
           kind: "missed_call",
+          source: "system",
           from: call.customer_phone_number || "",
           fromName: lead.name,
           subject: `Upset caller: ${lead.name}`,

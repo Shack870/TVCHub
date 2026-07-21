@@ -457,6 +457,7 @@ export const ingestEmail = onRequest(
         text.slice(0, 4000);
       const ref = await db.collection("messages").add({
         kind: "tvc_message",
+        source: "human",
         from: fromRaw,
         fromName,
         subject: body.subject || null,
