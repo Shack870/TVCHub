@@ -1048,6 +1048,52 @@ function ContactLogTab({
                     {a.notes && (
                       <p className="mt-1 font-type text-sm text-pad-ink">{a.notes}</p>
                     )}
+                    {a.ai && (a.ai.summary || a.ai.commitments.length > 0) && (
+                      <div className="mt-2 rounded-md border border-violet-800/25 bg-violet-500/10 px-3 py-2">
+                        <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                          <span className="rounded-full bg-violet-700 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-white">
+                            AI Call Summary
+                          </span>
+                          {a.ai.pitched && (
+                            <span className="rounded-full bg-violet-500/20 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-violet-900">
+                              {a.ai.pitchResult === 'bought'
+                                ? 'Pitched · said yes'
+                                : a.ai.pitchResult === 'declined'
+                                  ? 'Pitched · declined'
+                                  : a.ai.pitchResult === 'thinking'
+                                    ? 'Pitched · thinking it over'
+                                    : 'Pitched'}
+                            </span>
+                          )}
+                          {a.ai.upset && (
+                            <span className="rounded-full bg-red-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-red-800">
+                              Upset caller
+                            </span>
+                          )}
+                        </div>
+                        {a.ai.summary && (
+                          <p className="font-type text-sm text-pad-ink">{a.ai.summary}</p>
+                        )}
+                        {a.ai.commitments.length > 0 && (
+                          <ul className="mt-1 space-y-0.5">
+                            {a.ai.commitments.map((c, ci) => (
+                              <li
+                                key={ci}
+                                className="flex items-start gap-1.5 font-type text-xs text-violet-950"
+                              >
+                                <span className="mt-0.5 text-violet-700">☐</span>
+                                {c}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {a.ai.callbackAt && (
+                          <p className="mt-1 font-type text-xs font-semibold text-violet-900">
+                            Callback agreed: {fmtDate(a.ai.callbackAt)}
+                          </p>
+                        )}
+                      </div>
+                    )}
                     {a.recordingUrl && (
                       <a
                         href={a.recordingUrl}

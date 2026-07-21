@@ -251,6 +251,18 @@ export const syncCallRail = onSchedule(
       const missedInbound =
         call.direction === "inbound" && (!call.answered || call.voicemail);
 
+      // CallRail transcribes recordings asynchronously — often minutes after
+      // the call ends. If an answered+recorded call has no transcript yet and
+      // is still fresh, skip it WITHOUT a marker so a later run picks it up
+      // with the transcript (and therefore an AI summary) attached.
+      const transcriptPending =
+        !missedInbound &&
+        call.answered &&
+        Boolean(call.recording_duration) &&
+        (!call.transcription || call.transcription.length <= 40) &&
+        Date.now() - startedAt < 3 * 3600_000;
+      if (transcriptPending) continue;
+
       if (missedInbound) {
         // Surface the callback on the desk instead of burying it in a log —
         // a lead calling back and missing us is exactly a "don't drop this".
@@ -313,11 +325,9 @@ export const syncCallRail = onSchedule(
 
       const dir = call.direction === "inbound" ? "Inbound" : "Outbound";
       const dur = fmtDuration(call.duration);
+      // Keep notes to the bare facts; the AI summary renders from the `ai`
+      // field in its own block on the timeline.
       let notes = `${dir} call via CallRail${dur ? ` — ${dur}` : ""}.`;
-      if (analysis?.summary) notes += ` ${analysis.summary}`;
-      if (analysis?.commitments.length) {
-        notes += ` Commitments: ${analysis.commitments.join("; ")}.`;
-      }
       if (analysis && analysis.connection === "wrong_number") {
         notes += " ⚠ Sounded like a wrong number — verify the phone on file.";
       }
