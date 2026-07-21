@@ -41,6 +41,16 @@ export interface ContactAttempt {
   callId?: string;
   recordingUrl?: string | null;
   durationSec?: number | null;
+  // Transcript analysis (advisory only — never drives stage changes).
+  ai?: {
+    connection: 'conversation' | 'brief' | 'voicemail' | 'wrong_number' | 'unclear';
+    pitched: boolean;
+    pitchResult: 'bought' | 'declined' | 'thinking' | 'not_pitched';
+    summary: string;
+    commitments: string[];
+    callbackAt: string | null;
+    upset: boolean;
+  };
 }
 
 export interface FollowUp {
@@ -176,6 +186,10 @@ export interface Lead {
   // back to the top and stamps it as re-sent.
   lastReferralAt?: number;
   referralCount?: number;
+  // Cadence engine bookkeeping (see functions/src/cadence.ts).
+  lastConnectedAt?: number | null; // last real two-way conversation
+  cadenceExhaustedAt?: number | null; // chase gave up after max attempts
+  courtPassedNotifiedAt?: number | null; // court date passed while undecided
 
   // --- Ownership ---
   owner?: string | null; // display label of the operator who owns this lead

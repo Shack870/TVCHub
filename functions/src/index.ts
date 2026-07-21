@@ -17,3 +17,4 @@ getFirestore().settings({ ignoreUndefinedProperties: true });
 export { ingestEmail } from "./ingest.js";
 export { extractPdf } from "./extract.js";
 export { syncCallRail } from "./callrail.js";
+export { cadenceSweep } from "./cadence.js";
