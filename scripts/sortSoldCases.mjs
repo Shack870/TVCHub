@@ -88,18 +88,21 @@ for (const d of docs) {
     fu?.done ? fu : { ...fu, done: true, doneAt: now },
   );
 
+  // Business dates come from the paid CALL (saleStatusAt is the ts of the
+  // attempt whose transcript showed money collected), never from run time.
+  const paidTs = saleAt ?? dec(f.retainedAt) ?? now;
   const fieldsPatch = {
     stage: { stringValue: to },
     autoStageNote: { stringValue: note },
     autoStageAt: { integerValue: String(now) },
-    retainedAt: { integerValue: String(dec(f.retainedAt) ?? saleAt ?? now) },
+    retainedAt: { integerValue: String(dec(f.retainedAt) ?? paidTs) },
     followUps: enc(followUps),
     updatedAt: { integerValue: String(now) },
   };
   if (to === 'financed') fieldsPatch.isFinanced = { booleanValue: true };
   if (to === 'intake_complete') {
     fieldsPatch.intakeComplete = { booleanValue: true };
-    fieldsPatch.intakeCompleteAt = { integerValue: String(now) };
+    fieldsPatch.intakeCompleteAt = { integerValue: String(paidTs) };
   }
   const mask = Object.keys(fieldsPatch)
     .map((k) => `updateMask.fieldPaths=${k}`)

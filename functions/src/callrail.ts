@@ -208,9 +208,11 @@ export function autoStageMove(
   const followUps = Array.isArray(d.followUps) ? (d.followUps as Record<string, unknown>[]) : [];
   const patch: Record<string, unknown> = {
     stage: to,
+    // Business dates come from the CALL where the payment happened, not from
+    // when the automation got around to processing it.
     retainedAt: (d.retainedAt as number) ?? callTs,
     autoStageNote: note,
-    autoStageAt: now,
+    autoStageAt: now, // when the automation acted — audit metadata only
     // Money collected — sales follow-ups no longer apply; close them so they
     // don't linger on the calendar / Today queue.
     followUps: followUps.map((f) => (f.done ? f : { ...f, done: true, doneAt: now })),
@@ -218,7 +220,7 @@ export function autoStageMove(
   if (to === "financed") patch.isFinanced = true;
   if (to === "intake_complete") {
     patch.intakeComplete = true;
-    patch.intakeCompleteAt = now;
+    patch.intakeCompleteAt = callTs;
   }
   return { patch, note };
 }
