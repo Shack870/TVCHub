@@ -44,6 +44,10 @@ async function postIt(
     kind?: "tvc_message" | "billing_escalation";
     noPursuit?: boolean;
     nonPaymentReason?: string | null;
+    // Timestamp of the underlying event (promise call, last attempt, court
+    // date). The post-it displays receivedAt, so it must reflect when the
+    // thing HAPPENED, not when the sweep got around to writing the note.
+    eventAt?: number;
   } = {},
 ): Promise<void> {
   await db.collection("messages").add({
@@ -61,7 +65,7 @@ async function postIt(
     nonPaymentReason: opts.nonPaymentReason ?? null,
     noPursuit: opts.noPursuit ?? false,
     gmailMessageId: null,
-    receivedAt: Date.now(),
+    receivedAt: opts.eventAt ?? Date.now(),
     handled: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -144,7 +148,12 @@ export const cadenceSweep = onSchedule(
             `${lead.name} said YES on ${promisedDate} and ${amt} is on the table, but ZERO calls` +
               ` (in or out) have happened since. This money is waiting purely on us — call them NOW.` +
               (reason ? `\nWhy it wasn't collected on the call: ${reason}` : ""),
-            { kind: "billing_escalation", noPursuit: true, nonPaymentReason: reason },
+            {
+              kind: "billing_escalation",
+              noPursuit: true,
+              nonPaymentReason: reason,
+              eventAt: promisedAt,
+            },
           );
           flagged++;
         } else if (collectionAttempts > 0 && d.salePursuitAlertAt) {
@@ -177,7 +186,7 @@ export const cadenceSweep = onSchedule(
             `Said yes on ${new Date(promisedAt).toLocaleDateString("en-US")} but ${amt} was never collected` +
               ` (${collectionAttempts} collection attempt${collectionAttempts === 1 ? "" : "s"} since).` +
               ` Decide: keep collecting, re-pitch, or release the file.`,
-            { kind: "billing_escalation", nonPaymentReason: reason },
+            { kind: "billing_escalation", nonPaymentReason: reason, eventAt: promisedAt },
           );
           flagged++;
         } else if (!openBilling && (collectionAttempts === 0 || now - lastAttemptTs >= 2 * DAY)) {
@@ -206,6 +215,7 @@ export const cadenceSweep = onSchedule(
                 (d.nextCourtDate
                   ? ` Court date ${d.nextCourtDate} — free court reminders will continue; decide whether to keep the file open.`
                   : ` No court date on file — decide: keep chasing or write off.`),
+              { eventAt: lastAttemptTs || undefined },
             );
             flagged++;
           }
@@ -275,6 +285,7 @@ export const cadenceSweep = onSchedule(
               lead,
               `Court date passed: ${lead.name}`,
               `Their court date (${courtDate}) has passed and the lead was never retained or written off. Close it out or check how the case went.`,
+              { eventAt: courtMs },
             );
             flagged++;
           }
