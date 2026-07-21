@@ -36,6 +36,11 @@ export interface ContactAttempt {
   outcome: ContactOutcome;
   notes?: string;
   by?: string; // user display name / uid
+  // Set by the CallRail sync for auto-logged phone activity.
+  via?: 'callrail';
+  callId?: string;
+  recordingUrl?: string | null;
+  durationSec?: number | null;
 }
 
 export interface FollowUp {

@@ -86,7 +86,21 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
             {statusChip}
           </div>
           <p className="mt-4 whitespace-pre-wrap font-hand text-2xl leading-snug text-yellow-950">
-            {msg.message}
+            {msg.message.split(/(https?:\/\/\S+)/g).map((part, i) =>
+              /^https?:\/\//.test(part) ? (
+                <a
+                  key={i}
+                  href={part}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline decoration-2 underline-offset-2"
+                >
+                  {part.includes('callrail') ? '▶ Listen to the call' : part}
+                </a>
+              ) : (
+                part
+              ),
+            )}
           </p>
           <div className="mt-6 flex items-center justify-between gap-2">
             {/* Archiving takes the note off the desk for good; only offered

@@ -1028,11 +1028,18 @@ function ContactLogTab({
                   />
                   <div className="rounded-md bg-white/70 px-3 py-2">
                     <div className="flex items-center justify-between">
-                      <span
-                        className="font-type text-sm font-bold"
-                        style={{ color: meta.color }}
-                      >
-                        {OUTCOME_LABELS[a.outcome]}
+                      <span className="flex items-center gap-2">
+                        <span
+                          className="font-type text-sm font-bold"
+                          style={{ color: meta.color }}
+                        >
+                          {OUTCOME_LABELS[a.outcome]}
+                        </span>
+                        {a.via === 'callrail' && (
+                          <span className="rounded-full bg-sky-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-sky-800">
+                            CallRail
+                          </span>
+                        )}
                       </span>
                       <span className="font-type text-xs text-pad-inkSoft/60">
                         {formatDistanceToNow(a.ts, { addSuffix: true })}
@@ -1040,6 +1047,17 @@ function ContactLogTab({
                     </div>
                     {a.notes && (
                       <p className="mt-1 font-type text-sm text-pad-ink">{a.notes}</p>
+                    )}
+                    {a.recordingUrl && (
+                      <a
+                        href={a.recordingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ink-link mt-1 inline-block font-type text-xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        ▶ Listen to recording
+                      </a>
                     )}
                     {a.by && (
                       <p className="mt-0.5 font-type text-[11px] text-pad-inkSoft/50">
