@@ -64,6 +64,7 @@ export interface ContactAttempt {
     saleAmount?: number | null;
     paymentPlan?: 'full' | 'financed' | 'unknown';
     paymentPromise?: string | null;
+    nonPaymentReason?: string | null;
   };
 }
 
@@ -212,6 +213,8 @@ export interface Lead {
   salePromisedAt?: number | null; // when the verbal yes happened
   saleAmount?: number | null; // dollar figure quoted/collected, when known
   saleEscalatedAt?: number | null; // billing cadence raised the decision post-it
+  saleNonPaymentReason?: string | null; // classifier's read on why no money moved
+  salePursuitAlertAt?: number | null; // no-pursuit alarm raised (no call since promise)
   // Audit trail for automatic stage moves (classifier-confirmed payments).
   autoStageNote?: string | null;
   autoStageAt?: number | null;
@@ -273,6 +276,15 @@ export interface TvcMessage {
   // Who stuck this note on the desk. Older docs may lack it — the UI falls
   // back to kind/from heuristics (see noteSplit in NotepadBoard).
   source?: 'human' | 'system' | null;
+  // Client contact info so system post-its are actionable in one tap.
+  phone?: string | null;
+  email?: string | null;
+  // Why money didn't change hands on the promise call (from the transcript
+  // classifier) — rendered on the blue note under the flip-up billing post-it.
+  nonPaymentReason?: string | null;
+  // Maximum urgency: money was promised and NOT ONE call (in or out) has
+  // happened since. Cleared/downgraded once any later call exists.
+  noPursuit?: boolean | null;
   leadId?: string | null;
   callrailCallId?: string | null;
   from: string;

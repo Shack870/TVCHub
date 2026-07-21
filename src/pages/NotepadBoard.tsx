@@ -105,9 +105,14 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
       .filter((m) => !m.handled || (m.handledAt ?? m.updatedAt) > weekAgo)
       .sort((a, b) => {
         if (a.handled !== b.handled) return a.handled ? 1 : -1;
-        // Within unhandled, money-on-the-table escalations float first.
-        const bill = Number(isBillingNote(b)) - Number(isBillingNote(a));
-        return bill !== 0 && !a.handled ? bill : b.receivedAt - a.receivedAt;
+        // Within unhandled: no-pursuit alarms first, then billing, then newest.
+        if (!a.handled) {
+          const rank = (m: typeof a) =>
+            isBillingNote(m) && m.noPursuit ? 2 : isBillingNote(m) ? 1 : 0;
+          const urgent = rank(b) - rank(a);
+          if (urgent !== 0) return urgent;
+        }
+        return b.receivedAt - a.receivedAt;
       });
     const action = visible.filter(isSystemNote);
     const tvc = visible.filter((m) => !isSystemNote(m));
@@ -320,7 +325,9 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
                 : 'No messages from TVC on the desk.'}
             </p>
           ) : (
-            <div className="flex gap-5 overflow-x-auto pb-3 pt-2">
+            // overflow stays visible so a flipped-up note can overlay the UI
+            // above it instead of being clipped by a scroll container
+            <div className="flex flex-wrap gap-5 pb-3 pt-2">
               {notes.map((m, i) => (
                 <MessagePostIt key={m.id} msg={m} index={i} />
               ))}

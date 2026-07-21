@@ -52,6 +52,9 @@ export interface CallAnalysis {
   saleAmount: number | null;
   paymentPlan: "full" | "financed" | "unknown";
   paymentPromise: string | null;
+  // For promised_unpaid: WHY no money moved on this call — the caller's stated
+  // reason, or an explicit call-out that the agent never attempted to collect.
+  nonPaymentReason: string | null;
 }
 
 export const ANALYSIS_SYSTEM = `You analyze a phone call transcript between a law firm (Agent) and a traffic-case lead (Caller). The firm's funnel is: reach the lead ("connect"), pitch representation, then the lead buys, declines, or thinks about it.
@@ -67,6 +70,7 @@ Return ONLY a JSON object:
 - "saleAmount": the dollar amount quoted or collected as a number (e.g. 1625), or null if no figure was stated.
 - "paymentPlan": "full" (paying in one payment), "financed" (payment plan / installments discussed), or "unknown".
 - "paymentPromise": for promised_unpaid only — a short quote of what they committed to ("will pay Friday after payday"), else null.
+- "nonPaymentReason": for promised_unpaid only — 1-2 sentences explaining WHY money did not change hands on this call. If the caller gave a reason, state it ("Gets paid Friday and will call back then", "Needs to check with his boss who covers company tickets"). If the AGENT never asked for payment or never attempted to run a card, say that explicitly ("The agent never asked for payment on this call — the yes was left hanging with no collection attempt"). null when not promised_unpaid.
 Do not invent facts. If the transcript is empty or useless, use connection "unclear", empty summary.`;
 
 async function analyzeTranscript(
@@ -115,6 +119,7 @@ async function analyzeTranscript(
         ? parsed.paymentPlan
         : "unknown",
       paymentPromise: parsed.paymentPromise ? String(parsed.paymentPromise) : null,
+      nonPaymentReason: parsed.nonPaymentReason ? String(parsed.nonPaymentReason) : null,
     };
   } catch (e) {
     logger.warn("Transcript analysis failed; falling back to basic logging", e);
@@ -168,6 +173,7 @@ export function saleRollup(
   if (analysis.saleAmount) patch.saleAmount = analysis.saleAmount;
   if (analysis.saleStatus === "promised_unpaid") {
     patch.salePromisedAt = callTs;
+    patch.saleNonPaymentReason = analysis.nonPaymentReason ?? null;
   } else {
     // Paid (full or partial) clears the promised flag and its escalation.
     patch.saleEscalatedAt = null;
@@ -331,9 +337,12 @@ export const syncCallRail = onSchedule(
       .collection("leads")
       .orderBy("createdAt", "desc")
       .limit(1000)
-      .select("name", "phone", "altPhone", "deletedAt")
+      .select("name", "phone", "altPhone", "email", "deletedAt")
       .get();
-    const byPhone = new Map<string, { id: string; name: string }>();
+    const byPhone = new Map<
+      string,
+      { id: string; name: string; phone: string | null; email: string | null }
+    >();
     for (const doc of leadSnap.docs) {
       const d = doc.data();
       if (d.deletedAt) continue;
@@ -341,7 +350,12 @@ export const syncCallRail = onSchedule(
         const key = last10(p);
         // First (newest) lead wins a shared number.
         if (key.length === 10 && !byPhone.has(key)) {
-          byPhone.set(key, { id: doc.id, name: d.name });
+          byPhone.set(key, {
+            id: doc.id,
+            name: d.name,
+            phone: (d.phone as string) || null,
+            email: (d.email as string) || null,
+          });
         }
       }
     }
@@ -392,6 +406,8 @@ export const syncCallRail = onSchedule(
           tvcCaseNumber: null,
           memberName: lead.name,
           leadId: lead.id,
+          phone: lead.phone || call.customer_phone_number || null,
+          email: lead.email,
           gmailMessageId: null,
           callrailCallId: call.id,
           receivedAt: startedAt,
@@ -546,6 +562,8 @@ export const syncCallRail = onSchedule(
           tvcCaseNumber: null,
           memberName: lead.name,
           leadId: lead.id,
+          phone: lead.phone || call.customer_phone_number || null,
+          email: lead.email,
           gmailMessageId: null,
           callrailCallId: call.id,
           receivedAt: startedAt,

@@ -37,13 +37,17 @@ function chaseGapDays(attemptCount: number): number | null {
 
 async function postIt(
   db: ReturnType<typeof getFirestore>,
-  lead: { id: string; name: string },
+  lead: { id: string; name: string; phone?: string | null; email?: string | null },
   subject: string,
   message: string,
-  kind: "tvc_message" | "billing_escalation" = "tvc_message",
+  opts: {
+    kind?: "tvc_message" | "billing_escalation";
+    noPursuit?: boolean;
+    nonPaymentReason?: string | null;
+  } = {},
 ): Promise<void> {
   await db.collection("messages").add({
-    kind,
+    kind: opts.kind ?? "tvc_message",
     source: "system",
     from: "TVCHub Cadence",
     fromName: "Cadence Engine",
@@ -52,6 +56,10 @@ async function postIt(
     tvcCaseNumber: null,
     memberName: lead.name,
     leadId: lead.id,
+    phone: lead.phone ?? null,
+    email: lead.email ?? null,
+    nonPaymentReason: opts.nonPaymentReason ?? null,
+    noPursuit: opts.noPursuit ?? false,
     gmailMessageId: null,
     receivedAt: Date.now(),
     handled: false,
@@ -75,7 +83,12 @@ export const cadenceSweep = onSchedule(
     for (const doc of snap.docs) {
       const d = doc.data();
       if (d.deletedAt) continue;
-      const lead = { id: doc.id, name: (d.name as string) || "(unnamed)" };
+      const lead = {
+        id: doc.id,
+        name: (d.name as string) || "(unnamed)",
+        phone: (d.phone as string) || null,
+        email: (d.email as string) || null,
+      };
       const attempts: { ts?: number; outcome?: string }[] = Array.isArray(d.contactAttempts)
         ? d.contactAttempts
         : [];
@@ -101,11 +114,62 @@ export const cadenceSweep = onSchedule(
         const promisedAt = (d.salePromisedAt as number) || (d.saleStatusAt as number) || now;
         const collectionAttempts = attempts.filter((a) => (a.ts ?? 0) > promisedAt).length;
         const openBilling = openFollowUps.some((f) => f.type === "billing");
+        const amt = d.saleAmount ? `$${d.saleAmount}` : "payment";
+        const promisedDate = new Date(promisedAt).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          timeZone: "America/Chicago",
+        });
+        const reason = (d.saleNonPaymentReason as string) || null;
 
-        if (!d.saleEscalatedAt && (collectionAttempts >= 3 || now - promisedAt >= 7 * DAY)) {
+        // PURSUIT VERIFICATION — the loudest alarm we have. contactAttempts
+        // includes every call in or out (CallRail-synced and hand-logged), so
+        // zero attempts after the promise means the money is waiting purely
+        // on us: nobody called them and they never got through to us.
+        let escalated = Boolean(d.saleEscalatedAt);
+        if (collectionAttempts === 0 && !d.salePursuitAlertAt && now - promisedAt >= DAY) {
+          // The alarm doubles as the escalation post-it (its loudest form), so
+          // stamp saleEscalatedAt too — otherwise the 7-day branch below would
+          // drop a second, quieter note for the same money.
+          await doc.ref.update({
+            salePursuitAlertAt: now,
+            saleEscalatedAt: d.saleEscalatedAt ?? now,
+            updatedAt: now,
+          });
+          escalated = true;
+          await postIt(
+            db,
+            lead,
+            `NO CALLBACK MADE — ${amt} promised ${promisedDate}`,
+            `${lead.name} said YES on ${promisedDate} and ${amt} is on the table, but ZERO calls` +
+              ` (in or out) have happened since. This money is waiting purely on us — call them NOW.` +
+              (reason ? `\nWhy it wasn't collected on the call: ${reason}` : ""),
+            { kind: "billing_escalation", noPursuit: true, nonPaymentReason: reason },
+          );
+          flagged++;
+        } else if (collectionAttempts > 0 && d.salePursuitAlertAt) {
+          // A call happened since the promise — stand the alarm down to the
+          // normal billing escalation treatment.
+          await doc.ref.update({ salePursuitAlertAt: null, updatedAt: now });
+          const open = await db
+            .collection("messages")
+            .where("leadId", "==", lead.id)
+            .where("kind", "==", "billing_escalation")
+            .where("handled", "==", false)
+            .get();
+          for (const m of open.docs) {
+            if (!m.data().noPursuit || m.data().deletedAt) continue;
+            await m.ref.update({
+              noPursuit: false,
+              subject: `Promised ${amt} never collected: ${lead.name}`,
+              updatedAt: now,
+            });
+          }
+        }
+
+        if (!escalated && (collectionAttempts >= 3 || now - promisedAt >= 7 * DAY)) {
           // Money has been on the table too long — put the decision on the desk.
           await doc.ref.update({ saleEscalatedAt: now, updatedAt: now });
-          const amt = d.saleAmount ? `$${d.saleAmount}` : "payment";
           await postIt(
             db,
             lead,
@@ -113,7 +177,7 @@ export const cadenceSweep = onSchedule(
             `Said yes on ${new Date(promisedAt).toLocaleDateString("en-US")} but ${amt} was never collected` +
               ` (${collectionAttempts} collection attempt${collectionAttempts === 1 ? "" : "s"} since).` +
               ` Decide: keep collecting, re-pitch, or release the file.`,
-            "billing_escalation",
+            { kind: "billing_escalation", nonPaymentReason: reason },
           );
           flagged++;
         } else if (!openBilling && (collectionAttempts === 0 || now - lastAttemptTs >= 2 * DAY)) {
