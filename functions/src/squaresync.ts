@@ -7,8 +7,9 @@ import { getFirestore } from "firebase-admin/firestore";
 //
 // Every 15 minutes this pulls COMPLETED payments from the Square production
 // account (Iron Rock Law Firm) and reconciles them against leads:
-//   - a payment matching a lead (phone → email → unique name in the payment
-//     note → unique full name on the customer record) appends a
+//   - a payment matching a lead (phone → email → a concurrent CallRail call
+//     with corroboration → unique name in the payment note → unique full name
+//     on the customer record) appends a
 //     "retained" contact attempt, rolls the money up onto the lead's sale
 //     fields (paid_full / paid_partial with a running squarePaidTotal), moves
 //     paid-in-full leads to intake_complete, and clears any open
@@ -194,28 +195,110 @@ export const syncSquare = onSchedule(
       }
     }
 
-    // TEMPORAL evidence needs every CallRail attempt timestamp — a heavier
-    // read (full contactAttempts arrays), so load it lazily and only once,
-    // the first time an unmatched payment actually needs evaluating.
-    let callrailTs: number[] | null = null;
-    const loadCallrailTs = async (): Promise<number[]> => {
-      if (callrailTs) return callrailTs;
+    // CALL-TIME evidence needs every CallRail attempt (full contactAttempts
+    // arrays — a heavier read), so load it lazily and only once, the first
+    // time a payment that phone/email couldn't place actually needs it.
+    // Two products from one read:
+    //   - every callrail timestamp (temporal evidence for tvcEvidence)
+    //   - an interval index of RECENT calls: [call start, call start +
+    //     duration + 30m grace] per lead — payments are keyed mid-call, so a
+    //     payment landing inside exactly one lead's call window is a strong
+    //     identity candidate.
+    const CALL_INDEX_DAYS = 45;
+    const CALL_GRACE_MS = 30 * 60_000;
+    const CALL_DEFAULT_WINDOW_MS = 90 * 60_000; // no duration stored → assume 90m
+    interface CallInterval {
+      start: number;
+      end: number;
+      // Actual call end (start + recorded duration, no grace) — null when the
+      // attempt stored no duration. A payment inside THIS window was keyed
+      // literally mid-call: the strongest temporal signal there is.
+      strictEnd: number | null;
+      lead: LeadRef;
+      saleAmount: number | null;
+      // Transcript classifier said money moved on this call (ai.saleStatus).
+      aiPaid: boolean;
+    }
+    let callIndex: { ts: number[]; intervals: CallInterval[] } | null = null;
+    const loadCallIndex = async (): Promise<{ ts: number[]; intervals: CallInterval[] }> => {
+      if (callIndex) return callIndex;
       const snap = await db
         .collection("leads")
         .orderBy("createdAt", "desc")
         .limit(1000)
-        .select("contactAttempts", "deletedAt")
+        .select("contactAttempts", "deletedAt", "name", "saleAmount")
         .get();
       const ts: number[] = [];
+      const intervals: CallInterval[] = [];
+      const cutoff = Date.now() - CALL_INDEX_DAYS * 86400_000;
       for (const doc of snap.docs) {
         const d = doc.data();
         if (d.deletedAt) continue;
+        const lead: LeadRef = { id: doc.id, name: d.name };
+        const saleAmount =
+          typeof d.saleAmount === "number" && d.saleAmount > 0 ? d.saleAmount : null;
         for (const a of Array.isArray(d.contactAttempts) ? d.contactAttempts : []) {
-          if (a?.via === "callrail" && typeof a.ts === "number") ts.push(a.ts);
+          if (a?.via !== "callrail" || typeof a.ts !== "number") continue;
+          ts.push(a.ts);
+          if (a.ts < cutoff) continue;
+          const durMs =
+            typeof a.durationSec === "number" && a.durationSec > 0
+              ? a.durationSec * 1000
+              : null;
+          const end = durMs !== null ? a.ts + durMs + CALL_GRACE_MS : a.ts + CALL_DEFAULT_WINDOW_MS;
+          const aiPaid =
+            a.ai?.saleStatus === "paid_full" || a.ai?.saleStatus === "paid_partial";
+          intervals.push({
+            start: a.ts,
+            end,
+            strictEnd: durMs !== null ? a.ts + durMs : null,
+            lead,
+            saleAmount,
+            aiPaid,
+          });
         }
       }
-      callrailTs = ts.sort((a, b) => a - b);
-      return callrailTs;
+      callIndex = { ts: ts.sort((a, b) => a - b), intervals };
+      return callIndex;
+    };
+
+    // First/last name tokens (>= 4 chars) for the concurrent-call
+    // corroboration check — "did the note mention ANY part of this name?".
+    const nameTokens = (name: unknown): string[] => {
+      const parts = normalizeText(name).split(" ").filter(Boolean);
+      if (!parts.length) return [];
+      return [...new Set([parts[0], parts[parts.length - 1]])].filter((t) => t.length >= 4);
+    };
+    // Payment-note vocabulary — the words staff use when keying charges.
+    // Anything left over after stripping these (and numbers) is very likely a
+    // PERSON'S NAME, and a note that names someone other than the candidate
+    // lead must veto a concurrent-call match (the payer identity written down
+    // at charge time beats who happened to be on the phone).
+    const PAYMENT_VOCAB = new Set([
+      "retainer", "payment", "payments", "pymt", "pmt", "fee", "fees", "trial",
+      "balance", "owes", "owe", "due", "paid", "pay", "pays", "final", "last",
+      "first", "second", "third", "half", "full", "remaining", "rest",
+      "partial", "deposit", "down", "court", "case", "ticket", "tvc", "llc",
+      "law", "firm", "initial", "installment", "installments", "plan", "left",
+      "total", "amount", "charge", "charged", "card", "visa", "mastercard",
+      "amex", "discover", "cash", "check", "invoice", "received", "covers",
+      "covered", "of", "the", "for", "and", "per", "via", "on", "in", "to",
+      "a", "an", "no", "off", "with", "from", "by", "usd",
+    ]);
+    // Does the note carry name-like words that are NOT part of this lead's
+    // name? (All the lead's name parts count, middle names included.)
+    const noteNamesSomeoneElse = (noteNorm: string, leadName: unknown): boolean => {
+      if (!noteNorm) return false;
+      const leadParts = new Set(normalizeText(leadName).split(" ").filter(Boolean));
+      return noteNorm
+        .split(" ")
+        .some(
+          (t) =>
+            t.length >= 2 &&
+            !/^\d+$/.test(t) &&
+            !PAYMENT_VOCAB.has(t) &&
+            !leadParts.has(t),
+        );
     };
 
     // Does an unmatched payment carry ANY signal tying it to TVC intake?
@@ -229,7 +312,7 @@ export const syncSquare = onSchedule(
       noteText: string | null;
     }): Promise<string | null> => {
       // a. TEMPORAL — a CallRail call (any lead) in the 24h before the charge.
-      const calls = await loadCallrailTs();
+      const calls = (await loadCallIndex()).ts;
       if (calls.some((t) => t >= p.paidTs - 24 * 3600_000 && t <= p.paidTs)) {
         return "a CallRail call happened within 24h before the charge";
       }
@@ -287,12 +370,37 @@ export const syncSquare = onSchedule(
       if (!payerEmail && payment.buyer_email_address) payerEmail = payment.buyer_email_address;
       const noteText = (payment.note ?? "").trim() || null;
 
-      // Match to a lead: phone beats email beats note-text beats exact name.
-      // Phone/email are the strongest evidence; a name buried in the payment
-      // note is next (manual card entries carry identity ONLY there); an
-      // exact-unique-name hit on the customer record comes last.
+      // Match to a lead: phone beats email beats concurrent-call beats
+      // note-text beats exact name. Phone/email are the strongest evidence;
+      // a corroborated CallRail call in progress when the card was keyed is
+      // next (staff charge cards MID-CALL, and the call already sits on a
+      // specific lead); a name buried in the payment note follows (manual
+      // card entries carry identity ONLY there); an exact-unique-name hit on
+      // the customer record comes last.
+      //
+      // Whose name appears in the note? Computed once — the note matcher
+      // needs it, and the concurrent-call matcher needs it as a VETO (a note
+      // that clearly names lead X must never let a concurrent call credit
+      // the money to lead Y — the Dessie/"Parmjeet Singh" case stays manual).
+      const noteNamedLeads = new Map<string, LeadRef>();
+      if (noteText) {
+        const hay = ` ${normalizeText(noteText)} `;
+        for (const entry of noteNameIndex) {
+          if (entry.needles.some((n) => hay.includes(` ${n} `))) {
+            noteNamedLeads.set(entry.lead.id, entry.lead);
+          }
+        }
+      }
+
       let lead: LeadRef | undefined;
       let matchedBy: string | null = null;
+      // Extra context for the attempt note / unmatched post-it.
+      let concurrentDetail: string | null = null;
+      let concurrentCandidates: LeadRef[] = [];
+      // Note names lead X while the concurrent call was with lead Y — nobody
+      // gets auto-credited; a human must decide (forces the post-it path).
+      let noteCallConflict: string | null = null;
+
       const phoneKey = last10(payerPhone);
       if (phoneKey.length === 10) {
         lead = byPhone.get(phoneKey);
@@ -302,22 +410,101 @@ export const syncSquare = onSchedule(
         lead = byEmail.get(lc(payerEmail));
         if (lead) matchedBy = "email";
       }
-      if (!lead && noteText) {
-        // Whose name appears in the note? Must be exactly ONE lead — if two
-        // leads' names both show up, we refuse to guess.
-        const hay = ` ${normalizeText(noteText)} `;
-        const hits = new Map<string, LeadRef>();
-        for (const entry of noteNameIndex) {
-          if (entry.needles.some((n) => hay.includes(` ${n} `))) {
-            hits.set(entry.lead.id, entry.lead);
+      if (!lead) {
+        // CONCURRENT CALL — was exactly one lead on a CallRail call when the
+        // payment was keyed? Candidate only; requires corroboration.
+        const { intervals } = await loadCallIndex();
+        let hits = new Map<string, CallInterval>();
+        for (const iv of intervals) {
+          if (paidTs >= iv.start && paidTs <= iv.end) {
+            const prev = hits.get(iv.lead.id);
+            // Keep the interval with the strongest signals for corroboration.
+            if (!prev || (iv.aiPaid && !prev.aiPaid)) hits.set(iv.lead.id, iv);
           }
         }
+        // Several candidates? A payment keyed literally MID-CALL (inside the
+        // recorded duration, before any grace) outranks calls that merely
+        // ended within the grace window — narrow to strict hits when that
+        // leaves exactly one lead.
+        if (hits.size > 1) {
+          const strict = new Map(
+            [...hits].filter(
+              ([, iv]) => iv.strictEnd !== null && paidTs >= iv.start && paidTs <= iv.strictEnd,
+            ),
+          );
+          if (strict.size === 1) hits = strict;
+        }
+        concurrentCandidates = [...hits.values()].map((h) => h.lead);
         if (hits.size === 1) {
-          lead = [...hits.values()][0];
+          const hit = [...hits.values()][0];
+          const noteNorm = normalizeText(noteText);
+          const payerNorm = normalizeText(payerName);
+          // Every lead the payment's OWN identity fields point at — the
+          // staff-written note plus the Square customer-record name.
+          const namedLeads = new Map(noteNamedLeads);
+          if (payerNorm) {
+            const payerHay = ` ${payerNorm} `;
+            for (const entry of noteNameIndex) {
+              if (entry.needles.some((n) => payerHay.includes(` ${n} `))) {
+                namedLeads.set(entry.lead.id, entry.lead);
+              }
+            }
+          }
+          // VETO 1: the note or customer record names a DIFFERENT existing
+          // lead (the Dessie/"Parmjeet Singh" case) — conflicting identities,
+          // a human must decide, and note-matching must not run either.
+          const namesOtherLead = namedLeads.size > 0 && !namedLeads.has(hit.lead.id);
+          // VETO 2: the note or customer record carries name-like words
+          // foreign to this lead (a payer who was never entered as a lead,
+          // e.g. note "Ali Janneh" or customer "Keith Horton") — don't credit
+          // the lead who merely happened to be on the phone. No conflict
+          // post-it needed; the payment just stays unmatched.
+          const namesStranger =
+            !namesOtherLead &&
+            namedLeads.size === 0 &&
+            (noteNamesSomeoneElse(noteNorm, hit.lead.name) ||
+              noteNamesSomeoneElse(payerNorm, hit.lead.name));
+          if (namesOtherLead) {
+            const others = [...namedLeads.values()].map((l) => l.name).join(", ");
+            noteCallConflict =
+              `the payment identifies ${others} (note/customer record) but the concurrent ` +
+              `CallRail call was with ${hit.lead.name} — conflicting identities, refusing to ` +
+              `auto-credit either`;
+          } else if (!namesStranger) {
+            // Corroboration: at least one independent signal must agree.
+            let why: string | null = null;
+            const hay = ` ${noteNorm} ${payerNorm} `;
+            const token = nameTokens(hit.lead.name).find((t) => hay.includes(` ${t} `));
+            if (token) {
+              why = `payment note contains "${token}" from the lead's name`;
+            } else if (hit.saleAmount === null) {
+              why = "lead has no recorded fee yet, amount unconstrained";
+            } else if (Math.abs(dollars - hit.saleAmount) <= AMOUNT_TOLERANCE) {
+              why = `amount matches the lead's $${hit.saleAmount} fee`;
+            } else if (Math.abs(dollars * 2 - hit.saleAmount) <= AMOUNT_TOLERANCE) {
+              why = `amount is half of the lead's $${hit.saleAmount} fee`;
+            } else if (hit.aiPaid) {
+              why = "the call's transcript analysis says payment was collected on the call";
+            }
+            if (why) {
+              lead = hit.lead;
+              matchedBy = "concurrent_call";
+              const mins = Math.max(0, Math.round((paidTs - hit.start) / 60_000));
+              concurrentDetail =
+                `charge keyed ${mins}m into/after this lead's CallRail call; corroborated — ${why}`;
+            }
+          }
+        }
+      }
+      if (!lead && !noteCallConflict && noteText) {
+        // Note-text identity: must be exactly ONE lead — if two leads' names
+        // both show up, we refuse to guess.
+        if (noteNamedLeads.size === 1) {
+          lead = [...noteNamedLeads.values()][0];
           matchedBy = "note";
         }
       }
-      if (!lead) {
+      if (!lead && !noteCallConflict) {
         for (const candidate of [payerName, noteText]) {
           const key = lc(candidate);
           if (!key) continue;
@@ -335,7 +522,10 @@ export const syncSquare = onSchedule(
         // charges, so an unmatched payment only earns a post-it when it's
         // retainer-sized AND something ties it to TVC intake; the marker
         // guarantees a note is never re-created for the same payment.
-        const evidence = await tvcEvidence({ paidTs, dollars, payerName, payerPhone, noteText });
+        // A note/call identity conflict is itself top-tier evidence.
+        const evidence =
+          noteCallConflict ??
+          (await tvcEvidence({ paidTs, dollars, payerName, payerPhone, noteText }));
         if (
           evidence &&
           cents >= UNMATCHED_POSTIT_MIN_CENTS &&
@@ -347,6 +537,12 @@ export const syncSquare = onSchedule(
             payerPhone ? `phone: ${payerPhone}` : null,
             noteText ? `note: "${noteText}"` : null,
           ].filter(Boolean);
+          // Concurrent-call candidates a human can pick from (multiple leads
+          // on calls when the card was keyed, or a note/call conflict).
+          const candidateLine = concurrentCandidates.length
+            ? `\nLeads on a CallRail call when the charge was keyed: ` +
+              `${concurrentCandidates.map((l) => l.name).join(", ")} — one of them may be the payer.`
+            : "";
           await db.collection("messages").add({
             kind: "tvc_message",
             source: "system",
@@ -356,11 +552,12 @@ export const syncSquare = onSchedule(
             message:
               `A ${amountLabel} Square payment (${payment.id}) came in on ` +
               `${new Date(paidTs).toLocaleDateString("en-US", { timeZone: "America/Chicago" })} ` +
-              `but didn't match any lead by phone, email, note text, or name.\n` +
+              `but didn't match any lead by phone, email, concurrent call, note text, or name.\n` +
               (payerBits.length
                 ? `Payer info found — ${payerBits.join(" · ")}.`
                 : `No payer info was attached to the payment.`) +
               `\nWhy it's flagged: ${evidence}.` +
+              candidateLine +
               `\nMatch it to a lead manually (log the payment and mark the sale paid).`,
             tvcCaseNumber: null,
             memberName: payerName,
@@ -381,6 +578,9 @@ export const syncSquare = onSchedule(
           leadId: null,
           action: evidence ? "unmatched" : "ignored_unrelated",
           evidence: evidence ?? null,
+          concurrentCandidates: concurrentCandidates.length
+            ? concurrentCandidates.map((l) => l.name)
+            : null,
           amountCents: cents,
           payerName,
           payerEmail,
@@ -410,6 +610,10 @@ export const syncSquare = onSchedule(
         const patch: Record<string, unknown> = { updatedAt: now };
         if (!alreadyLogged) {
           let notes = `Square payment received — ${amountLabel} (payment ${payment.id})`;
+          if (matchedBy === "concurrent_call" && concurrentDetail) {
+            notes += ` — matched by concurrent call: ${concurrentDetail}`;
+            if (noteText) notes += ` (payment note: "${noteText}")`;
+          }
           if (matchedBy === "note") {
             notes += ` — matched by payment note "${noteText}"`;
             // Corroboration: staff charge the card DURING or right after the
