@@ -22,8 +22,18 @@ import { ensureFollowUp } from "./callrail.js";
 //
 // The sweep only ever ADDS follow-ups when a lead has nothing scheduled, and
 // never changes stage — humans decide outcomes; this just prevents silence.
+//
+// A separate RECEIVABLES pass watches the financed book: a payment plan whose
+// newest Square payment is 35+ days old gets a stalled-plan post-it (guarded
+// by planStallFlaggedAt, which syncSquare clears when money arrives — so a
+// plan that stays silent re-flags once per 35-day window).
 
 const DAY = 86400_000;
+
+// No Square payment for this long = the payment plan has stalled. Slightly
+// wider than the Financing board's 30-day STALLED badge so the desk post-it
+// lands only after the board has already been showing the warning.
+const PLAN_STALL_DAYS = 35;
 
 const ACTIVE_STAGES = ["new", "callback", "pitched", "attorney_call", "nurture"];
 
@@ -293,6 +303,69 @@ export const cadenceSweep = onSchedule(
       }
     }
 
+    // --- RECEIVABLES: stalled financed payment plans ------------------------
+    // A financed case is supposed to keep producing Square payments. When the
+    // newest one is PLAN_STALL_DAYS+ old (or none ever landed and the case has
+    // sat financed that long), put a post-it on the desk. planStallFlaggedAt
+    // guards the flag: syncSquare clears it when a payment arrives, and a plan
+    // that stays silent re-flags once per stall window.
+    let stalledPlans = 0;
+    const financedSnap = await db.collection("leads").where("stage", "==", "financed").get();
+    for (const doc of financedSnap.docs) {
+      const d = doc.data();
+      if (d.deletedAt) continue;
+      const flaggedAt = (d.planStallFlaggedAt as number) ?? 0;
+      if (flaggedAt && now - flaggedAt < PLAN_STALL_DAYS * DAY) continue;
+
+      const attempts: { ts?: number; via?: string }[] = Array.isArray(d.contactAttempts)
+        ? d.contactAttempts
+        : [];
+      const lastPaymentTs = attempts
+        .filter((a) => a?.via === "square" && typeof a.ts === "number")
+        .reduce((m, a) => Math.max(m, a.ts as number), 0);
+      // Never paid at all: age the plan from when it entered its financed /
+      // paid state instead, so a plan that never produced a payment still trips.
+      const anchor =
+        lastPaymentTs ||
+        (d.intakeCompleteAt as number) ||
+        (d.saleStatusAt as number) ||
+        0;
+      if (!anchor || now - anchor < PLAN_STALL_DAYS * DAY) continue;
+
+      const daysSince = Math.floor((now - anchor) / DAY);
+      const collected = (d.squarePaidTotal as number) ?? 0;
+      const saleAmount =
+        typeof d.saleAmount === "number" && d.saleAmount > 0 ? (d.saleAmount as number) : null;
+      const outstanding = saleAmount !== null ? Math.max(0, saleAmount - collected) : null;
+      const lead = {
+        id: doc.id,
+        name: (d.name as string) || "(unnamed)",
+        phone: (d.phone as string) || null,
+        email: (d.email as string) || null,
+      };
+
+      await doc.ref.update({ planStallFlaggedAt: now, updatedAt: now });
+      await postIt(
+        db,
+        lead,
+        `Payment plan stalled — ${lead.name}`,
+        `${lead.name} is financed but ` +
+          (lastPaymentTs
+            ? `their last Square payment was ${daysSince} days ago.`
+            : `no Square payment has ever landed (${daysSince} days on the plan).`) +
+          ` Collected so far: $${collected.toFixed(2)}` +
+          (outstanding !== null
+            ? ` of $${saleAmount!.toFixed(2)} — $${outstanding.toFixed(2)} still outstanding.`
+            : ` (no total fee on file).`) +
+          ` Call them and get the plan moving again.` +
+          (lead.phone ? `\nPhone: ${lead.phone}` : "") +
+          (lead.email ? `\nEmail: ${lead.email}` : ""),
+        // The post-it dates from when the money went quiet, not from the sweep.
+        { eventAt: lastPaymentTs || anchor },
+      );
+      stalledPlans++;
+    }
+
     logger.info("Cadence sweep complete", {
       activeLeads: snap.size,
       billingFollowUps: billing,
@@ -300,6 +373,7 @@ export const cadenceSweep = onSchedule(
       undecidedNudges: nudged,
       courtReminders: reminders,
       decisionPostIts: flagged,
+      stalledPlanPostIts: stalledPlans,
     });
   },
 );

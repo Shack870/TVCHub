@@ -217,6 +217,9 @@ export interface Lead {
   salePursuitAlertAt?: number | null; // no-pursuit alarm raised (no call since promise)
   squarePaidTotal?: number | null; // dollars collected via Square (see functions/src/squaresync.ts)
   squareVerifyFlaggedAt?: number | null; // transcript-says-paid-but-no-charge alarm raised
+  // Receivables watch: cadence flagged this financed plan as stalled (no
+  // Square payment in 35+ days). Cleared by syncSquare when money arrives.
+  planStallFlaggedAt?: number | null;
   // Audit trail for automatic stage moves (classifier-confirmed payments).
   autoStageNote?: string | null;
   autoStageAt?: number | null;

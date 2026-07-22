@@ -596,6 +596,9 @@ export const syncSquare = onSchedule(
         // installments eventually flip a partial to paid-in-full.
         const paidTotal = ((d.squarePaidTotal as number) ?? 0) + dollars;
         patch.squarePaidTotal = paidTotal;
+        // Fresh money resets the stalled-plan watch (see cadence.ts) so the
+        // next silent stretch gets its own post-it.
+        patch.planStallFlaggedAt = null;
 
         const saleAmount = (d.saleAmount as number) ?? null;
         const coversFee = !saleAmount || dollars >= saleAmount || paidTotal >= saleAmount;

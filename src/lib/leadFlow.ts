@@ -165,3 +165,52 @@ export function totalFeeOf(lead: Lead): number {
   if (!lead.financing) return 0;
   return lead.financing.totalFee + (lead.financing.warrantFee ?? 0);
 }
+
+// --- Receivables (Square-tracked payment plans) -----------------------------
+// The Square sync logs every reconciled charge as a via-'square' contact
+// attempt and accumulates squarePaidTotal; these helpers read that trail.
+
+// A plan with no payment this long is considered stalled on the board. The
+// cadence engine uses a slightly longer 35-day window before raising a
+// post-it (see functions/src/cadence.ts).
+export const PLAN_STALL_DAYS = 30;
+
+// Newest Square payment credited to the lead, or null if none ever landed.
+export function lastSquarePaymentTs(lead: Lead): number | null {
+  const ts = (lead.contactAttempts ?? [])
+    .filter((a) => a.via === 'square' && typeof a.ts === 'number')
+    .reduce((m, a) => Math.max(m, a.ts), 0);
+  return ts > 0 ? ts : null;
+}
+
+export function squareCollectedOf(lead: Lead): number {
+  return lead.squarePaidTotal ?? 0;
+}
+
+// Days since the plan last saw money. When no payment ever landed, count from
+// when the case entered its financed/paid state instead, so a plan that never
+// produced a single payment still ages into the stall flag.
+export function daysSinceLastSquarePayment(lead: Lead): number | null {
+  const anchor =
+    lastSquarePaymentTs(lead) ?? lead.intakeCompleteAt ?? lead.saleStatusAt ?? null;
+  if (!anchor) return null;
+  return Math.floor((Date.now() - anchor) / 86400_000);
+}
+
+export function isPlanStalled(lead: Lead): boolean {
+  if (lead.stage !== 'financed') return false;
+  const days = daysSinceLastSquarePayment(lead);
+  return days !== null && days > PLAN_STALL_DAYS;
+}
+
+// Edge case the auto-graduation in syncSquare should normally prevent: Square
+// shows the fee covered but the case still sits in 'financed'. Surfaced as a
+// "paid off?" hint suggesting a manual check.
+export function looksPaidOff(lead: Lead): boolean {
+  return (
+    lead.stage === 'financed' &&
+    typeof lead.saleAmount === 'number' &&
+    lead.saleAmount > 0 &&
+    squareCollectedOf(lead) >= lead.saleAmount
+  );
+}
