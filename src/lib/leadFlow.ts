@@ -10,7 +10,6 @@ export const STAGE_LABELS: Record<Stage, string> = {
   pitched: 'Pitched',
   attorney_call: 'Attorney Call',
   nurture: 'Follow-Up',
-  retained: 'Retained',
   financed: 'Financed',
   intake_complete: 'Intake Complete',
   lost: 'No Sale',
@@ -74,14 +73,14 @@ export function isPipelineLead(lead: Lead): boolean {
   return ['callback', 'pitched', 'attorney_call', 'nurture'].includes(lead.stage);
 }
 
-// Still being worked: not retained, financed, handed off, or written off.
+// Still being worked: not financed, handed off, or written off.
 export function isActiveLead(lead: Lead): boolean {
-  return !['retained', 'financed', 'intake_complete', 'lost'].includes(lead.stage);
+  return !['financed', 'intake_complete', 'lost'].includes(lead.stage);
 }
 
 // Reached a final disposition (won or lost).
 export function isTerminal(lead: Lead): boolean {
-  return ['retained', 'financed', 'intake_complete', 'lost'].includes(lead.stage);
+  return ['financed', 'intake_complete', 'lost'].includes(lead.stage);
 }
 
 // Which stage a contact outcome moves the lead to.
@@ -100,8 +99,10 @@ export function stageForOutcome(outcome: ContactOutcome): Stage {
       return 'attorney_call';
     case 'declined':
       return 'nurture';
+    // A retained outcome means money moved on the call — paid clients are
+    // handed off (the Square/CallRail sync applies the same routing).
     case 'retained':
-      return 'retained';
+      return 'intake_complete';
     case 'lost':
       return 'lost';
     default:
@@ -126,11 +127,9 @@ export function makeEmptyLead(partial: Partial<Lead>): Omit<Lead, 'id'> {
   };
 }
 
-// A lead we actually signed (retained/financed, possibly already handed off).
+// A lead we actually signed (financed or already handed off).
 export function isClient(lead: Lead): boolean {
-  return (
-    lead.stage === 'retained' || lead.stage === 'financed' || lead.stage === 'intake_complete'
-  );
+  return lead.stage === 'financed' || lead.stage === 'intake_complete';
 }
 
 // Has a fee and owes nothing — the balance is the source of truth, regardless

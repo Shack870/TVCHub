@@ -95,8 +95,8 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
   // The outcome bar is contextual to where the lead sits in its lifecycle, so
   // you can't (e.g.) decline a client who's already retained or handed off.
   const isActive = isActiveLead(lead);
-  // Financed clients get the same drawer actions as retained (they've hired us).
-  const isRetained = lead.stage === 'retained' || lead.stage === 'financed';
+  // Financed clients have hired us but aren't handed off yet.
+  const isRetained = lead.stage === 'financed';
   const isCompleted = lead.stage === 'intake_complete';
   const isLost = lead.stage === 'lost';
   const courtOverdue =
@@ -353,7 +353,7 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
           <button
             className="btn-ghost text-manila"
             onClick={doStamp('REOPENED', () => reopenIntake(lead))}
-            title="Move back to Retained"
+            title="Move back to Financed"
           >
             Reopen Intake
           </button>
@@ -1569,9 +1569,9 @@ function SalePendingBanner({
     setBusy(true);
     try {
       await markSalePaid(lead);
-      notify.success(`${lead.name} marked paid — record the fee to move them to Retained.`);
+      notify.success(`${lead.name} marked paid — record the fee to retain them.`);
       // The money is in: finish the job by retaining them with the real fee.
-      if (lead.stage !== 'retained' && lead.stage !== 'intake_complete') onRetain();
+      if (lead.stage !== 'intake_complete') onRetain();
     } finally {
       setBusy(false);
     }

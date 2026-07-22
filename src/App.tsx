@@ -6,7 +6,6 @@ import { AppShell } from './components/AppShell';
 import { LoginScreen } from './components/LoginScreen';
 import { HomeView } from './pages/HomeView';
 import { CommandCenter } from './pages/CommandCenter';
-import { RetainedList } from './pages/RetainedList';
 import { FinancingView } from './pages/FinancingView';
 import { CompletedList } from './pages/CompletedList';
 import { CalendarView } from './pages/CalendarView';
@@ -29,7 +28,6 @@ function AuthedApp() {
           <Route path="/" element={<HomeView />} />
           <Route path="/command-center" element={<CommandCenter />} />
           <Route path="/calendar" element={<CalendarView />} />
-          <Route path="/retained" element={<RetainedList />} />
           <Route path="/financing" element={<FinancingView />} />
           <Route path="/completed" element={<CompletedList />} />
           <Route path="/archived" element={<ArchivedView />} />

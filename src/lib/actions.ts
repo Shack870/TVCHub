@@ -239,10 +239,14 @@ export async function retainLead(
     // fee entered at retention is always applied and prior payments are kept.
     const existing = fresh.financing;
     const now = Date.now();
+    const financed = opts.isFinanced ?? false;
     return {
-      stage: 'retained',
+      // Same routing the Square/CallRail sync applies: a payment plan goes to
+      // Financed, a paid-in-full client is handed off (Intake Complete).
+      stage: financed ? 'financed' : 'intake_complete',
+      ...(financed ? {} : { intakeComplete: true, intakeCompleteAt: now }),
       retainedAt: fresh.retainedAt ?? now,
-      isFinanced: opts.isFinanced ?? false,
+      isFinanced: financed,
       // Sales follow-ups no longer apply once retained — close them so they don't
       // linger on the calendar / queues.
       followUps: (fresh.followUps ?? []).map((f) =>
@@ -288,8 +292,10 @@ export async function markIntakeComplete(lead: Lead): Promise<void> {
 }
 
 export async function reopenIntake(lead: Lead): Promise<void> {
+  // With the Retained stage gone, a reopened intake lands in Financed — the
+  // only remaining "client, not yet handed off" stage.
   await updateLead(lead.id, {
-    stage: 'retained',
+    stage: 'financed',
     intakeComplete: false,
     intakeCompleteAt: null,
   });
@@ -306,8 +312,8 @@ export async function sendToInitialLeads(lead: Lead): Promise<void> {
   });
 }
 
-// Send a retained client back to the active leads board. Since they were
-// contacted to get retained, they land in the Follow-Up Pipeline.
+// Send a client back to the active leads board. Since they were contacted to
+// get retained, they land in the Follow-Up Pipeline.
 export async function unretain(lead: Lead): Promise<void> {
   const stage = (lead.contactAttempts?.length ?? 0) > 0 ? 'pitched' : 'new';
   await updateLead(lead.id, {

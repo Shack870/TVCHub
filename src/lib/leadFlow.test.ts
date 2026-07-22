@@ -22,7 +22,7 @@ describe('stageForOutcome', () => {
     expect(stageForOutcome('thinking')).toBe('pitched');
     expect(stageForOutcome('wants_attorney')).toBe('attorney_call');
     expect(stageForOutcome('declined')).toBe('nurture');
-    expect(stageForOutcome('retained')).toBe('retained');
+    expect(stageForOutcome('retained')).toBe('intake_complete');
     expect(stageForOutcome('lost')).toBe('lost');
   });
 });
@@ -32,23 +32,23 @@ describe('stage predicates', () => {
     expect(isOnBoard(makeLead({ stage: 'new' }))).toBe(true);
     expect(isOnBoard(makeLead({ stage: 'pitched' }))).toBe(true);
     expect(isOnBoard(makeLead({ stage: 'nurture' }))).toBe(true);
-    expect(isOnBoard(makeLead({ stage: 'retained' }))).toBe(false);
+    expect(isOnBoard(makeLead({ stage: 'financed' }))).toBe(false);
   });
 
   it('isActiveLead excludes terminal stages', () => {
     expect(isActiveLead(makeLead({ stage: 'nurture' }))).toBe(true);
-    expect(isActiveLead(makeLead({ stage: 'retained' }))).toBe(false);
+    expect(isActiveLead(makeLead({ stage: 'financed' }))).toBe(false);
     expect(isActiveLead(makeLead({ stage: 'intake_complete' }))).toBe(false);
     expect(isActiveLead(makeLead({ stage: 'lost' }))).toBe(false);
   });
 
   it('isTerminal is the inverse set', () => {
-    expect(isTerminal(makeLead({ stage: 'retained' }))).toBe(true);
+    expect(isTerminal(makeLead({ stage: 'financed' }))).toBe(true);
     expect(isTerminal(makeLead({ stage: 'new' }))).toBe(false);
   });
 
-  it('isClient is retained or handed off', () => {
-    expect(isClient(makeLead({ stage: 'retained' }))).toBe(true);
+  it('isClient is financed or handed off', () => {
+    expect(isClient(makeLead({ stage: 'financed' }))).toBe(true);
     expect(isClient(makeLead({ stage: 'intake_complete' }))).toBe(true);
     expect(isClient(makeLead({ stage: 'lost' }))).toBe(false);
   });
@@ -56,7 +56,7 @@ describe('stage predicates', () => {
 
 describe('financing math', () => {
   const lead = makeLead({
-    stage: 'retained',
+    stage: 'financed',
     financing: {
       totalFee: 1000,
       warrantFee: 500,
@@ -82,7 +82,7 @@ describe('financing math', () => {
 
   it('isPaidInFull only when there is a fee and zero balance', () => {
     const paid = makeLead({
-      stage: 'retained',
+      stage: 'intake_complete',
       financing: {
         totalFee: 500,
         payments: [{ id: 'a', amount: 500, date: 0, method: 'card' }],

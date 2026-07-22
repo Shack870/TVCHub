@@ -119,7 +119,7 @@ function Row({
           <button
             className="btn-ghost px-2 py-1 text-xs text-pad-ink"
             onClick={() => reopenIntake(lead)}
-            title="Move back to Retained"
+            title="Move back to Financed"
           >
             Reopen
           </button>

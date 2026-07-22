@@ -127,7 +127,7 @@ function FinanceCard({
               ? 'Financed — paying'
               : lead.intakeComplete
                 ? 'Intake complete'
-                : 'Retained'}{' '}
+                : 'Owes balance'}{' '}
             · TVC #{lead.tvcCaseNumber || '—'}
           </p>
         </button>

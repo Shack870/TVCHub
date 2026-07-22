@@ -25,7 +25,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     }, 0),
     board: leads.filter(isOnBoard).length,
     command: leads.filter((l) => l.stage === 'callback' || l.stage === 'nurture' || l.stage === 'attorney_call').length,
-    retained: leads.filter((l) => l.stage === 'retained').length,
     financing: leads.filter(isFinancingClient).length,
     completed: leads.filter((l) => l.stage === 'intake_complete').length,
     noSale: leads.filter((l) => l.stage === 'lost').length,
@@ -48,7 +47,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Item to="/" label="Home" count={counts.today} icon="house" />
           <Item to="/command-center" label="Command Center" count={counts.command} icon="phone-call" />
           <Item to="/calendar" label="Calendar" count={counts.followups} icon="calendar" />
-          <Item to="/retained" label="Retained" count={counts.retained} icon="user-check" />
           <Item to="/financing" label="Finance" count={counts.financing} icon="wallet" />
           <Item to="/completed" label="Intake Complete" count={counts.completed} icon="circle-check" />
           <Item to="/no-sale" label="No Sale" count={counts.noSale} icon="ban" />
@@ -85,7 +83,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Item to="/" label="Home" count={counts.today} icon="house" mobile />
           <Item to="/command-center" label="Sales" count={counts.command} icon="phone-call" mobile />
           <Item to="/calendar" label="Cal" count={counts.followups} icon="calendar" mobile />
-          <Item to="/retained" label="Retained" count={counts.retained} icon="user-check" mobile />
           <Item to="/financing" label="Finance" count={counts.financing} icon="wallet" mobile />
           <Item to="/completed" label="Done" count={counts.completed} icon="circle-check" mobile />
           <Item to="/no-sale" label="No Sale" count={counts.noSale} icon="ban" mobile />

@@ -75,9 +75,9 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         moneyOnTable.push({ lead: l, why: `Said yes — ${bits.join(' · ')}` });
         continue;
       }
-      // 1. Court date passed (live or retained/financed case) — must be resolved.
+      // 1. Court date passed (live or financed case) — must be resolved.
       if (
-        (active || l.stage === 'retained' || l.stage === 'financed') &&
+        (active || l.stage === 'financed') &&
         !l.caseDismissed &&
         courtDatePassed(l)
       ) {

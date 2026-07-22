@@ -7,7 +7,6 @@ export type Stage =
   | 'pitched' // spoke with them, pitch delivered, awaiting decision
   | 'attorney_call' // requested to speak with an attorney, call scheduled
   | 'nurture' // declined / thinking -> sales command center follow-ups
-  | 'retained' // hired us
   | 'financed' // hired us on a payment plan — actively paying, not paid off
   | 'intake_complete' // handed off to the next department
   | 'lost'; // dead / unreachable / not interested — terminal, off the board

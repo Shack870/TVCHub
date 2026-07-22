@@ -183,7 +183,6 @@ export function buildReport(leads: Lead[], ref: Date = new Date()): SalesReport 
       value: byStage((l) => ['callback', 'pitched', 'attorney_call'].includes(l.stage)),
     },
     { label: 'Nurture', value: byStage((l) => l.stage === 'nurture') },
-    { label: 'Retained', value: byStage((l) => l.stage === 'retained') },
     { label: 'Financed', value: byStage((l) => l.stage === 'financed') },
     { label: 'Intake Done', value: byStage((l) => l.stage === 'intake_complete') },
     { label: 'No Sale', value: byStage((l) => l.stage === 'lost') },

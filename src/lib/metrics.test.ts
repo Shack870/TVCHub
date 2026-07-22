@@ -20,7 +20,7 @@ describe('buildReport', () => {
       makeLead({ id: '1', stage: 'new', receivedAt: thisWeek, createdAt: thisWeek }),
       makeLead({
         id: '2',
-        stage: 'retained',
+        stage: 'intake_complete',
         receivedAt: thisWeek,
         createdAt: thisWeek,
         retainedAt: thisWeek,
