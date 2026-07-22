@@ -7,7 +7,8 @@ import { getFirestore } from "firebase-admin/firestore";
 //
 // Every 15 minutes this pulls COMPLETED payments from the Square production
 // account (Iron Rock Law Firm) and reconciles them against leads:
-//   - a payment matching a lead (phone → email → unique full name) appends a
+//   - a payment matching a lead (phone → email → unique name in the payment
+//     note → unique full name on the customer record) appends a
 //     "retained" contact attempt, rolls the money up onto the lead's sale
 //     fields (paid_full / paid_partial with a running squarePaidTotal), moves
 //     paid-in-full leads to intake_complete, and clears any open
@@ -38,6 +39,10 @@ const last10 = (s: unknown): string =>
 const last7 = (s: unknown): string =>
   String(s ?? "").replace(/\D/g, "").slice(-7);
 const lc = (s: unknown): string => String(s ?? "").toLowerCase().trim();
+// Lowercase, punctuation stripped, whitespace collapsed — the shape both
+// payment notes and lead names are reduced to before substring matching.
+const normalizeText = (s: unknown): string =>
+  lc(s).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 // Last word of a full name ("Miguel A Carbo" -> "carbo").
 const lastName = (s: unknown): string => {
   const parts = lc(s).split(/\s+/).filter(Boolean);
@@ -142,6 +147,12 @@ export const syncSquare = onSchedule(
     const byPhone = new Map<string, LeadRef>();
     const byEmail = new Map<string, LeadRef>();
     const byName = new Map<string, LeadRef[]>();
+    // Note-text identity: staff key cards manually, leaving the Square
+    // customer blank — the client's name often lives ONLY in the payment's
+    // free-text note ("Khup Sum Retainer Payment"). Each lead contributes
+    // name variants ("first last", "last first", and first+last skipping
+    // middle names) to search for inside normalized notes.
+    const noteNameIndex: { needles: string[]; lead: LeadRef }[] = [];
     // Weaker evidence indexes — never enough to CREDIT a payment to a lead,
     // but enough to decide an unmatched charge smells like TVC money.
     const leadLastNames = new Set<string>();
@@ -160,6 +171,19 @@ export const syncSquare = onSchedule(
       if (email && !byEmail.has(email)) byEmail.set(email, lead);
       const name = lc(d.name);
       if (name) byName.set(name, [...(byName.get(name) ?? []), lead]);
+      const normName = normalizeText(d.name);
+      // Length floor keeps junk like "Al Bo" from substring-matching notes.
+      if (normName.length >= 6) {
+        const parts = normName.split(" ");
+        const needles = new Set<string>([parts.join(" ")]);
+        if (parts.length >= 2) {
+          needles.add([...parts].reverse().join(" "));
+          needles.add(`${parts[0]} ${parts[parts.length - 1]}`);
+          needles.add(`${parts[parts.length - 1]} ${parts[0]}`);
+        }
+        const usable = [...needles].filter((n) => n.length >= 6);
+        if (usable.length) noteNameIndex.push({ needles: usable, lead });
+      }
       if (lastName(d.name)) leadLastNames.add(lastName(d.name));
       if (
         (d.saleStatus === "promised_unpaid" || d.saleStatus === "paid_partial") &&
@@ -263,8 +287,10 @@ export const syncSquare = onSchedule(
       if (!payerEmail && payment.buyer_email_address) payerEmail = payment.buyer_email_address;
       const noteText = (payment.note ?? "").trim() || null;
 
-      // Match to a lead: phone beats email beats name; a name only counts
-      // when it's exact and unique among leads (no guessing between Smiths).
+      // Match to a lead: phone beats email beats note-text beats exact name.
+      // Phone/email are the strongest evidence; a name buried in the payment
+      // note is next (manual card entries carry identity ONLY there); an
+      // exact-unique-name hit on the customer record comes last.
       let lead: LeadRef | undefined;
       let matchedBy: string | null = null;
       const phoneKey = last10(payerPhone);
@@ -275,6 +301,21 @@ export const syncSquare = onSchedule(
       if (!lead && payerEmail) {
         lead = byEmail.get(lc(payerEmail));
         if (lead) matchedBy = "email";
+      }
+      if (!lead && noteText) {
+        // Whose name appears in the note? Must be exactly ONE lead — if two
+        // leads' names both show up, we refuse to guess.
+        const hay = ` ${normalizeText(noteText)} `;
+        const hits = new Map<string, LeadRef>();
+        for (const entry of noteNameIndex) {
+          if (entry.needles.some((n) => hay.includes(` ${n} `))) {
+            hits.set(entry.lead.id, entry.lead);
+          }
+        }
+        if (hits.size === 1) {
+          lead = [...hits.values()][0];
+          matchedBy = "note";
+        }
       }
       if (!lead) {
         for (const candidate of [payerName, noteText]) {
@@ -315,7 +356,7 @@ export const syncSquare = onSchedule(
             message:
               `A ${amountLabel} Square payment (${payment.id}) came in on ` +
               `${new Date(paidTs).toLocaleDateString("en-US", { timeZone: "America/Chicago" })} ` +
-              `but didn't match any lead by phone, email, or name.\n` +
+              `but didn't match any lead by phone, email, note text, or name.\n` +
               (payerBits.length
                 ? `Payer info found — ${payerBits.join(" · ")}.`
                 : `No payer info was attached to the payment.`) +
@@ -368,13 +409,31 @@ export const syncSquare = onSchedule(
         const now = Date.now();
         const patch: Record<string, unknown> = { updatedAt: now };
         if (!alreadyLogged) {
+          let notes = `Square payment received — ${amountLabel} (payment ${payment.id})`;
+          if (matchedBy === "note") {
+            notes += ` — matched by payment note "${noteText}"`;
+            // Corroboration: staff charge the card DURING or right after the
+            // retain call, so a note-matched payment landing within 3h of a
+            // CallRail call on this same lead is near-certain identity.
+            const call = attempts.find(
+              (a: { via?: string; ts?: number }) =>
+                a?.via === "callrail" &&
+                typeof a.ts === "number" &&
+                paidTs > a.ts &&
+                paidTs <= a.ts + 3 * 3600_000,
+            );
+            if (call) {
+              const mins = Math.max(1, Math.round((paidTs - (call.ts as number)) / 60_000));
+              notes += `; corroborated — charge landed ${mins}m after a CallRail call on this lead`;
+            }
+          }
           patch.contactAttempts = [
             ...attempts,
             {
               ts: paidTs,
               outcome: "retained",
               via: "square",
-              notes: `Square payment received — ${amountLabel} (payment ${payment.id})`,
+              notes,
               by: "Square sync",
               paymentId: payment.id,
             },
