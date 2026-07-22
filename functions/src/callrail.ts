@@ -296,18 +296,23 @@ export async function ensureFollowUp(
   return added;
 }
 
-// A returned call closes the loop: archive any open "Missed call" post-its
-// for this lead from before the call. "Upset caller" notes are left for a
-// human even though they share the missed_call kind.
+// A returned call closes the loop: mark any open "Missed call" post-its from
+// before the call as handled — matched by lead OR by the phone number on the
+// note itself (last 10 digits), so post-its without a leadId still clear when
+// we call that number back. Handled notes land in the UI's Handled tab
+// (handled + handledAt), keeping the paper trail instead of silently
+// archiving. "Upset caller" notes are left for a human even though they share
+// the missed_call kind.
 async function clearMissedCallPostIts(
   db: ReturnType<typeof getFirestore>,
-  leadId: string,
-  beforeTs: number,
+  opts: { leadId?: string | null; phoneKey?: string; callTs: number },
 ): Promise<number> {
+  const phoneKey = opts.phoneKey && opts.phoneKey.length === 10 ? opts.phoneKey : null;
+  if (!opts.leadId && !phoneKey) return 0;
   const snap = await db
     .collection("messages")
-    .where("leadId", "==", leadId)
     .where("kind", "==", "missed_call")
+    .where("handled", "==", false)
     .get();
   const now = Date.now();
   let cleared = 0;
@@ -315,8 +320,18 @@ async function clearMissedCallPostIts(
     const m = doc.data();
     if (m.deletedAt) continue;
     if (!String(m.subject || "").startsWith("Missed call")) continue;
-    if ((m.receivedAt ?? 0) > beforeTs) continue; // they missed us again AFTER this call
-    await doc.ref.update({ handled: true, deletedAt: now, updatedAt: now });
+    if ((m.receivedAt ?? 0) > opts.callTs) continue; // they missed us again AFTER this call
+    const leadMatch = Boolean(opts.leadId && m.leadId === opts.leadId);
+    const phoneMatch = Boolean(
+      phoneKey && (last10(m.phone) === phoneKey || last10(m.from) === phoneKey),
+    );
+    if (!leadMatch && !phoneMatch) continue;
+    await doc.ref.update({
+      handled: true,
+      handledAt: opts.callTs,
+      handledBy: "CallRail sync",
+      updatedAt: now,
+    });
     cleared++;
   }
   return cleared;
@@ -373,12 +388,30 @@ export const syncCallRail = onSchedule(
       const startedAt = new Date(call.start_time).getTime() || Date.now();
 
       if (!lead) {
+        // Even with no lead match, an outbound call to a number sitting on a
+        // missed-call post-it means the callback happened — clear the note.
+        if (call.direction === "outbound") {
+          const cleared = await clearMissedCallPostIts(db, { phoneKey: key, callTs: startedAt });
+          if (cleared) {
+            logger.info("Cleared missed-call post-its by phone match (no lead)", {
+              phone: call.customer_phone_number,
+              cleared,
+              callId: call.id,
+            });
+          }
+        }
         await marker.set({ processedAt: Date.now(), leadId: null, action: "ignored" });
         continue;
       }
 
       const missedInbound =
         call.direction === "inbound" && (!call.answered || call.voicemail);
+
+      // A call that's still ringing or in progress reports answered=false —
+      // processing it now would stamp a false "missed call" post-it on a call
+      // that actually connects. Skip fresh inbound calls WITHOUT a marker so
+      // the next run sees the settled record.
+      if (missedInbound && Date.now() - startedAt < 10 * 60_000) continue;
 
       // CallRail transcribes recordings asynchronously — often minutes after
       // the call ends. If an answered+recorded call has no transcript yet and
@@ -526,7 +559,11 @@ export const syncCallRail = onSchedule(
       // (inbound conversation) — the missed-call post-it has served its
       // purpose, so take it off the desk automatically.
       if (call.direction === "outbound" || CONVERSATION_OUTCOMES.includes(outcome)) {
-        const cleared = await clearMissedCallPostIts(db, lead.id, startedAt);
+        const cleared = await clearMissedCallPostIts(db, {
+          leadId: lead.id,
+          phoneKey: key,
+          callTs: startedAt,
+        });
         if (cleared) {
           logger.info("Cleared missed-call post-its after returned call", {
             leadId: lead.id,
