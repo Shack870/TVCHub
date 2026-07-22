@@ -34,6 +34,7 @@ import {
   updateCourtDate,
   snoozeFollowUp,
 } from '../lib/actions';
+import { SendToPdfAppButton } from './SendToPdfAppButton';
 import { PAYMENT_METHODS } from '../lib/payments';
 import { DAY } from '../lib/followups';
 import type { FollowUpType, Payment } from '../types';
@@ -350,13 +351,16 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
         )}
 
         {isCompleted && (
-          <button
-            className="btn-ghost text-manila"
-            onClick={doStamp('REOPENED', () => reopenIntake(lead))}
-            title="Move back to Financed"
-          >
-            Reopen Intake
-          </button>
+          <>
+            <SendToPdfAppButton lead={lead} tone="dark" />
+            <button
+              className="btn-ghost text-manila"
+              onClick={doStamp('REOPENED', () => reopenIntake(lead))}
+              title="Move back to Financed"
+            >
+              Reopen Intake
+            </button>
+          </>
         )}
 
         {isLost && (

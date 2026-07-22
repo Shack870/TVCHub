@@ -251,6 +251,11 @@ export interface Lead {
   // --- Handoff ---
   intakeComplete?: boolean;
   intakeCompleteAt?: number | null;
+  // Iron Rock PDF app handoff (see functions/src/pdfhandoff.ts). Stamped when
+  // the case is written into the PDF app's `cases` collection.
+  pdfAppSentAt?: number | null;
+  pdfAppCaseId?: string | null;
+  pdfAppSentBy?: string | null; // uid, or 'auto' for the stage-change trigger
 
   // --- Meta ---
   createdAt: number;

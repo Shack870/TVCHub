@@ -6,6 +6,7 @@ import type { Lead } from '../types';
 import { balanceOf, isPaidInFull, totalFeeOf } from '../lib/leadFlow';
 import { fmtDate, fmtMoney, paymentPastDue } from '../lib/dates';
 import { Badge } from '../components/ui/Badge';
+import { SendToPdfAppButton } from '../components/SendToPdfAppButton';
 import { reopenIntake } from '../lib/actions';
 
 export function CompletedList() {
@@ -112,7 +113,8 @@ function Row({
         </div>
       </td>
       <td className="px-4 py-3">
-        <div className="flex justify-end gap-2">
+        <div className="flex items-center justify-end gap-2">
+          <SendToPdfAppButton lead={lead} />
           <button className="btn-ghost px-2 py-1 text-xs text-pad-ink" onClick={onFinancing}>
             Payments
           </button>

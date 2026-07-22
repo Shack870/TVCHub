@@ -20,3 +20,4 @@ export { syncCallRail } from "./callrail.js";
 export { syncEmail } from "./emailsync.js";
 export { syncSquare } from "./squaresync.js";
 export { cadenceSweep } from "./cadence.js";
+export { sendToPdfApp, autoSendToPdfApp } from "./pdfhandoff.js";
