@@ -203,7 +203,13 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           }}
         />
       </span>
-      <span className="absolute bottom-0 right-0.5 font-hand text-[12px] leading-none text-blue-950/90">
+      {/* written on the BLUE note showing through the gap — sits in the
+          exposed triangle, nudged up off the edge, and carries the blue
+          note's slight twist so it reads as ink on that lower layer */}
+      <span
+        className="absolute bottom-[9px] right-[5px] font-hand text-[12px] leading-none text-blue-950/90"
+        style={{ transform: 'rotate(-2.5deg)' }}
+      >
         why?
       </span>
     </button>
