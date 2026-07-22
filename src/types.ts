@@ -217,6 +217,7 @@ export interface Lead {
   saleNonPaymentReason?: string | null; // classifier's read on why no money moved
   salePursuitAlertAt?: number | null; // no-pursuit alarm raised (no call since promise)
   squarePaidTotal?: number | null; // dollars collected via Square (see functions/src/squaresync.ts)
+  squareVerifyFlaggedAt?: number | null; // transcript-says-paid-but-no-charge alarm raised
   // Audit trail for automatic stage moves (classifier-confirmed payments).
   autoStageNote?: string | null;
   autoStageAt?: number | null;

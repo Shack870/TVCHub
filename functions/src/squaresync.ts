@@ -12,8 +12,16 @@ import { getFirestore } from "firebase-admin/firestore";
 //     fields (paid_full / paid_partial with a running squarePaidTotal), moves
 //     paid-in-full leads to intake_complete, and clears any open
 //     billing-escalation post-its — the money arrived, stand the alarm down.
-//   - a payment matching nobody gets an Action Item post-it (when it's big
-//     enough to be a retainer, not a small fee) asking for a manual match.
+//   - a payment matching nobody only gets an Action Item post-it when it's
+//     retainer-sized AND carries suggestive TVC evidence (a CallRail call in
+//     the 24h before the charge, an amount lining up with a promised fee, or
+//     a partial identity match). The Square account also takes general
+//     law-firm charges, so evidence-free strangers are ignored outright.
+//
+// A verification pass then runs the reconciliation in reverse: leads whose
+// transcript claimed money was collected (saleStatus paid_full/paid_partial)
+// but where no Square charge ever matched get a billing-escalation post-it —
+// "the call says paid, the processor says nothing".
 //
 // Mirrors the CallRail/Email syncs' safety rules: marker docs
 // (squarePayments/{paymentId}) make re-runs harmless, deleted leads are never
@@ -27,7 +35,14 @@ const LOCATION_ID = "LPK9GY4PHM28J"; // Iron Rock Law Firm
 
 const last10 = (s: unknown): string =>
   String(s ?? "").replace(/\D/g, "").slice(-10);
+const last7 = (s: unknown): string =>
+  String(s ?? "").replace(/\D/g, "").slice(-7);
 const lc = (s: unknown): string => String(s ?? "").toLowerCase().trim();
+// Last word of a full name ("Miguel A Carbo" -> "carbo").
+const lastName = (s: unknown): string => {
+  const parts = lc(s).split(/\s+/).filter(Boolean);
+  return parts.length >= 2 ? parts[parts.length - 1] : "";
+};
 
 // Payments below this are likely court fees / small charges, not retainers —
 // they still get markers but never raise an unmatched post-it.
@@ -105,17 +120,14 @@ export const syncSquare = onSchedule(
     const state = await stateRef.get();
     const lastSyncAt = (state.data()?.lastSyncAt as number) ?? Date.now() - 60 * 86400_000;
     const beginTime = new Date(lastSyncAt - 6 * 3600_000).toISOString();
+    // Where Square visibility begins: the verification pass can't call out a
+    // missing charge that predates the backfill window. Stamped once, on the
+    // first run that computes it.
+    const backfillStartAt =
+      (state.data()?.backfillStartAt as number) ?? lastSyncAt - 60 * 86400_000;
 
     const payments = await fetchPayments(token, beginTime);
     const completed = payments.filter((p) => p.status === "COMPLETED");
-    if (!completed.length) {
-      await stateRef.set({ lastSyncAt: Date.now() }, { merge: true });
-      logger.info("Square sync complete — no completed payments in window", {
-        pulled: payments.length,
-        beginTime,
-      });
-      return;
-    }
 
     // Lead indexes over recent leads (covers the active board plus months of
     // history). Newest lead wins a shared phone/email; names must be unique
@@ -124,12 +136,17 @@ export const syncSquare = onSchedule(
       .collection("leads")
       .orderBy("createdAt", "desc")
       .limit(1000)
-      .select("name", "phone", "altPhone", "email", "deletedAt")
+      .select("name", "phone", "altPhone", "email", "deletedAt", "saleStatus", "saleAmount")
       .get();
     type LeadRef = { id: string; name: string };
     const byPhone = new Map<string, LeadRef>();
     const byEmail = new Map<string, LeadRef>();
     const byName = new Map<string, LeadRef[]>();
+    // Weaker evidence indexes — never enough to CREDIT a payment to a lead,
+    // but enough to decide an unmatched charge smells like TVC money.
+    const leadLastNames = new Set<string>();
+    const leadPhone7 = new Set<string>();
+    const openSaleAmounts: number[] = []; // promised_unpaid / paid_partial fees
     for (const doc of leadSnap.docs) {
       const d = doc.data();
       if (d.deletedAt) continue;
@@ -137,12 +154,80 @@ export const syncSquare = onSchedule(
       for (const p of [d.phone, d.altPhone]) {
         const key = last10(p);
         if (key.length === 10 && !byPhone.has(key)) byPhone.set(key, lead);
+        if (last7(p).length === 7) leadPhone7.add(last7(p));
       }
       const email = lc(d.email);
       if (email && !byEmail.has(email)) byEmail.set(email, lead);
       const name = lc(d.name);
       if (name) byName.set(name, [...(byName.get(name) ?? []), lead]);
+      if (lastName(d.name)) leadLastNames.add(lastName(d.name));
+      if (
+        (d.saleStatus === "promised_unpaid" || d.saleStatus === "paid_partial") &&
+        typeof d.saleAmount === "number" &&
+        d.saleAmount > 0
+      ) {
+        openSaleAmounts.push(d.saleAmount);
+      }
     }
+
+    // TEMPORAL evidence needs every CallRail attempt timestamp — a heavier
+    // read (full contactAttempts arrays), so load it lazily and only once,
+    // the first time an unmatched payment actually needs evaluating.
+    let callrailTs: number[] | null = null;
+    const loadCallrailTs = async (): Promise<number[]> => {
+      if (callrailTs) return callrailTs;
+      const snap = await db
+        .collection("leads")
+        .orderBy("createdAt", "desc")
+        .limit(1000)
+        .select("contactAttempts", "deletedAt")
+        .get();
+      const ts: number[] = [];
+      for (const doc of snap.docs) {
+        const d = doc.data();
+        if (d.deletedAt) continue;
+        for (const a of Array.isArray(d.contactAttempts) ? d.contactAttempts : []) {
+          if (a?.via === "callrail" && typeof a.ts === "number") ts.push(a.ts);
+        }
+      }
+      callrailTs = ts.sort((a, b) => a - b);
+      return callrailTs;
+    };
+
+    // Does an unmatched payment carry ANY signal tying it to TVC intake?
+    // Returns the signal description, or null for unrelated firm business.
+    const AMOUNT_TOLERANCE = 5; // dollars
+    const tvcEvidence = async (p: {
+      paidTs: number;
+      dollars: number;
+      payerName: string | null;
+      payerPhone: string | null;
+      noteText: string | null;
+    }): Promise<string | null> => {
+      // a. TEMPORAL — a CallRail call (any lead) in the 24h before the charge.
+      const calls = await loadCallrailTs();
+      if (calls.some((t) => t >= p.paidTs - 24 * 3600_000 && t <= p.paidTs)) {
+        return "a CallRail call happened within 24h before the charge";
+      }
+      // b. AMOUNT — the charge (or 2x, a half-down split) equals an open fee.
+      for (const fee of openSaleAmounts) {
+        if (Math.abs(p.dollars - fee) <= AMOUNT_TOLERANCE) {
+          return `amount matches a lead's open $${fee} fee`;
+        }
+        if (Math.abs(p.dollars * 2 - fee) <= AMOUNT_TOLERANCE) {
+          return `amount is half of a lead's open $${fee} fee`;
+        }
+      }
+      // c. IDENTITY-PARTIAL — last-name or phone-last-7 overlap with a lead.
+      // (Email domain alone is deliberately NOT enough.)
+      for (const candidate of [p.payerName, p.noteText]) {
+        const ln = lastName(candidate);
+        if (ln && leadLastNames.has(ln)) return `payer last name "${ln}" matches a lead`;
+      }
+      const p7 = last7(p.payerPhone);
+      if (p7.length === 7 && leadPhone7.has(p7)) return "payer phone (last 7) matches a lead";
+      return null;
+    };
 
     const customerCache = new Map<string, SqCustomer | null>();
     let matched = 0;
@@ -205,9 +290,16 @@ export const syncSquare = onSchedule(
       }
 
       if (!lead) {
-        // Nobody to credit. Big payments (retainer-sized) go on the desk for
-        // a manual match; the marker guarantees the note is never re-created.
-        if (cents >= UNMATCHED_POSTIT_MIN_CENTS && unmatchedPostIts < MAX_UNMATCHED_POSTITS_PER_RUN) {
+        // Nobody to credit. The Square account also runs general law-firm
+        // charges, so an unmatched payment only earns a post-it when it's
+        // retainer-sized AND something ties it to TVC intake; the marker
+        // guarantees a note is never re-created for the same payment.
+        const evidence = await tvcEvidence({ paidTs, dollars, payerName, payerPhone, noteText });
+        if (
+          evidence &&
+          cents >= UNMATCHED_POSTIT_MIN_CENTS &&
+          unmatchedPostIts < MAX_UNMATCHED_POSTITS_PER_RUN
+        ) {
           const payerBits = [
             payerName ? `name: ${payerName}` : null,
             payerEmail ? `email: ${payerEmail}` : null,
@@ -227,6 +319,7 @@ export const syncSquare = onSchedule(
               (payerBits.length
                 ? `Payer info found — ${payerBits.join(" · ")}.`
                 : `No payer info was attached to the payment.`) +
+              `\nWhy it's flagged: ${evidence}.` +
               `\nMatch it to a lead manually (log the payment and mark the sale paid).`,
             tvcCaseNumber: null,
             memberName: payerName,
@@ -245,10 +338,12 @@ export const syncSquare = onSchedule(
         await marker.set({
           processedAt: Date.now(),
           leadId: null,
-          action: "unmatched",
+          action: evidence ? "unmatched" : "ignored_unrelated",
+          evidence: evidence ?? null,
           amountCents: cents,
           payerName,
           payerEmail,
+          payerPhone,
         });
         unmatched++;
         continue;
@@ -371,7 +466,74 @@ export const syncSquare = onSchedule(
       });
     }
 
-    await stateRef.set({ lastSyncAt: Date.now() }, { merge: true });
+    // --- Verification pass: transcript says paid, processor says nothing ----
+    // The CallRail classifier sets paid_full/paid_partial from what was SAID
+    // on a call. If 24h+ has passed and no Square charge ever matched the
+    // lead, the claimed money may never have moved — raise the alarm once.
+    let verifyFlagged = 0;
+    const now = Date.now();
+    const paidLeads = await db
+      .collection("leads")
+      .where("saleStatus", "in", ["paid_full", "paid_partial"])
+      .select(
+        "name", "phone", "email", "deletedAt", "saleStatus", "saleStatusAt",
+        "saleAmount", "squarePaidTotal", "squareVerifyFlaggedAt",
+      )
+      .get();
+    for (const doc of paidLeads.docs) {
+      const d = doc.data();
+      if (d.deletedAt) continue;
+      if (d.squareVerifyFlaggedAt) continue; // one alarm per lead, ever
+      if ((d.squarePaidTotal as number) > 0) continue; // a real charge matched
+      const statusAt = (d.saleStatusAt as number) ?? 0;
+      if (!statusAt) continue; // no timestamp — can't reason about it
+      if (now - statusAt < 24 * 3600_000) continue; // give the charge time to land
+      if (statusAt < backfillStartAt) continue; // charge would predate Square visibility
+
+      const amt = d.saleAmount ? `$${d.saleAmount}` : "an unknown amount";
+      const day = new Date(statusAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        timeZone: "America/Chicago",
+      });
+      // Mirrors the cadence engine's billing-escalation post-it convention
+      // (see postIt in cadence.ts) so it gets the same gold treatment.
+      await db.collection("messages").add({
+        kind: "billing_escalation",
+        source: "system",
+        from: "TVCHub Cadence",
+        fromName: "Square Sync",
+        subject: `Transcript says PAID but no Square charge — ${d.name}`,
+        message:
+          `${d.name} was marked ${d.saleStatus === "paid_full" ? "paid in full" : "partially paid"}` +
+          ` (${amt}) on ${day}, but no matching Square charge has been found since.` +
+          ` Either the payment ran outside Square (check the ledger) or the call's` +
+          ` payment claim was wrong — verify the money actually moved.`,
+        tvcCaseNumber: null,
+        memberName: d.name,
+        leadId: doc.id,
+        phone: (d.phone as string) ?? null,
+        email: (d.email as string) ?? null,
+        nonPaymentReason: null,
+        noPursuit: false,
+        gmailMessageId: null,
+        receivedAt: statusAt,
+        handled: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await doc.ref.update({ squareVerifyFlaggedAt: now, updatedAt: now });
+      verifyFlagged++;
+      logger.info("Flagged transcript-paid lead with no Square charge", {
+        leadId: doc.id,
+        name: d.name,
+        saleStatus: d.saleStatus,
+        saleAmount: d.saleAmount ?? null,
+        saleStatusAt: statusAt,
+      });
+    }
+
+    await stateRef.set({ lastSyncAt: Date.now(), backfillStartAt }, { merge: true });
     logger.info("Square sync complete", {
       pulled: payments.length,
       completed: completed.length,
@@ -379,6 +541,7 @@ export const syncSquare = onSchedule(
       unmatched,
       unmatchedPostIts,
       escalationsCleared,
+      verifyFlagged,
     });
   },
 );
