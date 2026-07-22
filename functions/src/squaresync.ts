@@ -14,11 +14,15 @@ import { getFirestore } from "firebase-admin/firestore";
 //     fields (paid_full / paid_partial with a running squarePaidTotal), moves
 //     paid-in-full leads to intake_complete, and clears any open
 //     billing-escalation post-its — the money arrived, stand the alarm down.
-//   - a payment matching nobody only gets an Action Item post-it when it's
-//     retainer-sized AND carries suggestive TVC evidence (a CallRail call in
-//     the 24h before the charge, an amount lining up with a promised fee, or
-//     a partial identity match). The Square account also takes general
-//     law-firm charges, so evidence-free strangers are ignored outright.
+//   - a payment matching nobody is ignored SILENTLY (marker doc only). The
+//     Square account also takes general law-firm charges and payments from
+//     clients who never came through the app, so unmatched money is not the
+//     app's business — no matter the amount or timing. The ONE exception:
+//     ambiguous identity that a human must untangle — a note/customer record
+//     naming a DIFFERENT lead than the concurrent call's lead (the
+//     Dessie/"Parmjeet Singh" case), or several leads on calls when the
+//     charge was keyed with nothing else to pick between them. Those get a
+//     manual-review post-it.
 //
 // A verification pass then runs the reconciliation in reverse: leads whose
 // transcript claimed money was collected (saleStatus paid_full/paid_partial)
@@ -37,23 +41,11 @@ const LOCATION_ID = "LPK9GY4PHM28J"; // Iron Rock Law Firm
 
 const last10 = (s: unknown): string =>
   String(s ?? "").replace(/\D/g, "").slice(-10);
-const last7 = (s: unknown): string =>
-  String(s ?? "").replace(/\D/g, "").slice(-7);
 const lc = (s: unknown): string => String(s ?? "").toLowerCase().trim();
 // Lowercase, punctuation stripped, whitespace collapsed — the shape both
 // payment notes and lead names are reduced to before substring matching.
 const normalizeText = (s: unknown): string =>
   lc(s).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-// Last word of a full name ("Miguel A Carbo" -> "carbo").
-const lastName = (s: unknown): string => {
-  const parts = lc(s).split(/\s+/).filter(Boolean);
-  return parts.length >= 2 ? parts[parts.length - 1] : "";
-};
-
-// Payments below this are likely court fees / small charges, not retainers —
-// they still get markers but never raise an unmatched post-it.
-const UNMATCHED_POSTIT_MIN_CENTS = 200 * 100;
-const MAX_UNMATCHED_POSTITS_PER_RUN = 10;
 
 interface SqMoney {
   amount?: number; // smallest currency unit (cents for USD)
@@ -142,7 +134,7 @@ export const syncSquare = onSchedule(
       .collection("leads")
       .orderBy("createdAt", "desc")
       .limit(1000)
-      .select("name", "phone", "altPhone", "email", "deletedAt", "saleStatus", "saleAmount")
+      .select("name", "phone", "altPhone", "email", "deletedAt")
       .get();
     type LeadRef = { id: string; name: string };
     const byPhone = new Map<string, LeadRef>();
@@ -154,11 +146,6 @@ export const syncSquare = onSchedule(
     // name variants ("first last", "last first", and first+last skipping
     // middle names) to search for inside normalized notes.
     const noteNameIndex: { needles: string[]; lead: LeadRef }[] = [];
-    // Weaker evidence indexes — never enough to CREDIT a payment to a lead,
-    // but enough to decide an unmatched charge smells like TVC money.
-    const leadLastNames = new Set<string>();
-    const leadPhone7 = new Set<string>();
-    const openSaleAmounts: number[] = []; // promised_unpaid / paid_partial fees
     for (const doc of leadSnap.docs) {
       const d = doc.data();
       if (d.deletedAt) continue;
@@ -166,7 +153,6 @@ export const syncSquare = onSchedule(
       for (const p of [d.phone, d.altPhone]) {
         const key = last10(p);
         if (key.length === 10 && !byPhone.has(key)) byPhone.set(key, lead);
-        if (last7(p).length === 7) leadPhone7.add(last7(p));
       }
       const email = lc(d.email);
       if (email && !byEmail.has(email)) byEmail.set(email, lead);
@@ -185,25 +171,15 @@ export const syncSquare = onSchedule(
         const usable = [...needles].filter((n) => n.length >= 6);
         if (usable.length) noteNameIndex.push({ needles: usable, lead });
       }
-      if (lastName(d.name)) leadLastNames.add(lastName(d.name));
-      if (
-        (d.saleStatus === "promised_unpaid" || d.saleStatus === "paid_partial") &&
-        typeof d.saleAmount === "number" &&
-        d.saleAmount > 0
-      ) {
-        openSaleAmounts.push(d.saleAmount);
-      }
     }
 
-    // CALL-TIME evidence needs every CallRail attempt (full contactAttempts
+    // CALL-TIME identity needs every CallRail attempt (full contactAttempts
     // arrays — a heavier read), so load it lazily and only once, the first
     // time a payment that phone/email couldn't place actually needs it.
-    // Two products from one read:
-    //   - every callrail timestamp (temporal evidence for tvcEvidence)
-    //   - an interval index of RECENT calls: [call start, call start +
-    //     duration + 30m grace] per lead — payments are keyed mid-call, so a
-    //     payment landing inside exactly one lead's call window is a strong
-    //     identity candidate.
+    // The product: an interval index of RECENT calls — [call start, call
+    // start + duration + 30m grace] per lead — payments are keyed mid-call,
+    // so a payment landing inside exactly one lead's call window is a strong
+    // identity candidate.
     const CALL_INDEX_DAYS = 45;
     const CALL_GRACE_MS = 30 * 60_000;
     const CALL_DEFAULT_WINDOW_MS = 90 * 60_000; // no duration stored → assume 90m
@@ -219,8 +195,8 @@ export const syncSquare = onSchedule(
       // Transcript classifier said money moved on this call (ai.saleStatus).
       aiPaid: boolean;
     }
-    let callIndex: { ts: number[]; intervals: CallInterval[] } | null = null;
-    const loadCallIndex = async (): Promise<{ ts: number[]; intervals: CallInterval[] }> => {
+    let callIndex: CallInterval[] | null = null;
+    const loadCallIndex = async (): Promise<CallInterval[]> => {
       if (callIndex) return callIndex;
       const snap = await db
         .collection("leads")
@@ -228,7 +204,6 @@ export const syncSquare = onSchedule(
         .limit(1000)
         .select("contactAttempts", "deletedAt", "name", "saleAmount")
         .get();
-      const ts: number[] = [];
       const intervals: CallInterval[] = [];
       const cutoff = Date.now() - CALL_INDEX_DAYS * 86400_000;
       for (const doc of snap.docs) {
@@ -239,7 +214,6 @@ export const syncSquare = onSchedule(
           typeof d.saleAmount === "number" && d.saleAmount > 0 ? d.saleAmount : null;
         for (const a of Array.isArray(d.contactAttempts) ? d.contactAttempts : []) {
           if (a?.via !== "callrail" || typeof a.ts !== "number") continue;
-          ts.push(a.ts);
           if (a.ts < cutoff) continue;
           const durMs =
             typeof a.durationSec === "number" && a.durationSec > 0
@@ -258,7 +232,7 @@ export const syncSquare = onSchedule(
           });
         }
       }
-      callIndex = { ts: ts.sort((a, b) => a - b), intervals };
+      callIndex = intervals;
       return callIndex;
     };
 
@@ -301,45 +275,13 @@ export const syncSquare = onSchedule(
         );
     };
 
-    // Does an unmatched payment carry ANY signal tying it to TVC intake?
-    // Returns the signal description, or null for unrelated firm business.
+    // Corroboration tolerance for the concurrent-call matcher's amount check.
     const AMOUNT_TOLERANCE = 5; // dollars
-    const tvcEvidence = async (p: {
-      paidTs: number;
-      dollars: number;
-      payerName: string | null;
-      payerPhone: string | null;
-      noteText: string | null;
-    }): Promise<string | null> => {
-      // a. TEMPORAL — a CallRail call (any lead) in the 24h before the charge.
-      const calls = (await loadCallIndex()).ts;
-      if (calls.some((t) => t >= p.paidTs - 24 * 3600_000 && t <= p.paidTs)) {
-        return "a CallRail call happened within 24h before the charge";
-      }
-      // b. AMOUNT — the charge (or 2x, a half-down split) equals an open fee.
-      for (const fee of openSaleAmounts) {
-        if (Math.abs(p.dollars - fee) <= AMOUNT_TOLERANCE) {
-          return `amount matches a lead's open $${fee} fee`;
-        }
-        if (Math.abs(p.dollars * 2 - fee) <= AMOUNT_TOLERANCE) {
-          return `amount is half of a lead's open $${fee} fee`;
-        }
-      }
-      // c. IDENTITY-PARTIAL — last-name or phone-last-7 overlap with a lead.
-      // (Email domain alone is deliberately NOT enough.)
-      for (const candidate of [p.payerName, p.noteText]) {
-        const ln = lastName(candidate);
-        if (ln && leadLastNames.has(ln)) return `payer last name "${ln}" matches a lead`;
-      }
-      const p7 = last7(p.payerPhone);
-      if (p7.length === 7 && leadPhone7.has(p7)) return "payer phone (last 7) matches a lead";
-      return null;
-    };
 
     const customerCache = new Map<string, SqCustomer | null>();
     let matched = 0;
     let unmatched = 0;
-    let unmatchedPostIts = 0;
+    let ambiguityPostIts = 0;
     let escalationsCleared = 0;
 
     for (const payment of completed) {
@@ -413,7 +355,7 @@ export const syncSquare = onSchedule(
       if (!lead) {
         // CONCURRENT CALL — was exactly one lead on a CallRail call when the
         // payment was keyed? Candidate only; requires corroboration.
-        const { intervals } = await loadCallIndex();
+        const intervals = await loadCallIndex();
         let hits = new Map<string, CallInterval>();
         for (const iv of intervals) {
           if (paidTs >= iv.start && paidTs <= iv.end) {
@@ -518,47 +460,53 @@ export const syncSquare = onSchedule(
       }
 
       if (!lead) {
-        // Nobody to credit. The Square account also runs general law-firm
-        // charges, so an unmatched payment only earns a post-it when it's
-        // retainer-sized AND something ties it to TVC intake; the marker
-        // guarantees a note is never re-created for the same payment.
-        // A note/call identity conflict is itself top-tier evidence.
-        const evidence =
-          noteCallConflict ??
-          (await tvcEvidence({ paidTs, dollars, payerName, payerPhone, noteText }));
-        if (
-          evidence &&
-          cents >= UNMATCHED_POSTIT_MIN_CENTS &&
-          unmatchedPostIts < MAX_UNMATCHED_POSTITS_PER_RUN
-        ) {
+        // Nobody to credit — ignore SILENTLY (marker doc only). The Square
+        // account also takes general firm charges and payments from clients
+        // who never came through the app, so unmatched money is not the
+        // app's business, no matter the amount or timing.
+        //
+        // The ONE post-it case: ambiguous identity a human must untangle —
+        // a note/customer naming a DIFFERENT lead than the concurrent call's
+        // lead, or several leads on calls when the charge was keyed with the
+        // note/customer pointing at none of them (and at no stranger either —
+        // a note clearly naming a non-lead payer means it's simply not ours).
+        const multiCandidateAmbiguity =
+          !noteCallConflict &&
+          concurrentCandidates.length > 1 &&
+          noteNamedLeads.size === 0 &&
+          !noteNamesSomeoneElse(
+            normalizeText(`${noteText ?? ""} ${payerName ?? ""}`),
+            concurrentCandidates.map((l) => l.name).join(" "),
+          );
+        const ambiguity = noteCallConflict
+          ? noteCallConflict
+          : multiCandidateAmbiguity
+            ? `${concurrentCandidates.length} leads were on CallRail calls when the charge ` +
+              `was keyed (${concurrentCandidates.map((l) => l.name).join(", ")}) and nothing ` +
+              `on the payment picks between them`
+            : null;
+        if (ambiguity) {
           const payerBits = [
             payerName ? `name: ${payerName}` : null,
             payerEmail ? `email: ${payerEmail}` : null,
             payerPhone ? `phone: ${payerPhone}` : null,
             noteText ? `note: "${noteText}"` : null,
           ].filter(Boolean);
-          // Concurrent-call candidates a human can pick from (multiple leads
-          // on calls when the card was keyed, or a note/call conflict).
-          const candidateLine = concurrentCandidates.length
-            ? `\nLeads on a CallRail call when the charge was keyed: ` +
-              `${concurrentCandidates.map((l) => l.name).join(", ")} — one of them may be the payer.`
-            : "";
           await db.collection("messages").add({
             kind: "tvc_message",
             source: "system",
             from: "Square Sync",
             fromName: "Square Sync",
-            subject: `Unmatched Square payment — ${amountLabel}`,
+            subject: `Ambiguous Square payment — ${amountLabel}`,
             message:
               `A ${amountLabel} Square payment (${payment.id}) came in on ` +
               `${new Date(paidTs).toLocaleDateString("en-US", { timeZone: "America/Chicago" })} ` +
-              `but didn't match any lead by phone, email, concurrent call, note text, or name.\n` +
+              `and looks like a client payment, but the sync can't safely pick who to credit.\n` +
               (payerBits.length
                 ? `Payer info found — ${payerBits.join(" · ")}.`
                 : `No payer info was attached to the payment.`) +
-              `\nWhy it's flagged: ${evidence}.` +
-              candidateLine +
-              `\nMatch it to a lead manually (log the payment and mark the sale paid).`,
+              `\nWhy it needs a human: ${ambiguity}.` +
+              `\nDecide who this money belongs to (log the payment and mark the sale paid).`,
             tvcCaseNumber: null,
             memberName: payerName,
             leadId: null,
@@ -571,13 +519,13 @@ export const syncSquare = onSchedule(
             createdAt: Date.now(),
             updatedAt: Date.now(),
           });
-          unmatchedPostIts++;
+          ambiguityPostIts++;
         }
         await marker.set({
           processedAt: Date.now(),
           leadId: null,
-          action: evidence ? "unmatched" : "ignored_unrelated",
-          evidence: evidence ?? null,
+          action: ambiguity ? "unmatched" : "ignored_unrelated",
+          evidence: ambiguity ?? null,
           concurrentCandidates: concurrentCandidates.length
             ? concurrentCandidates.map((l) => l.name)
             : null,
@@ -802,7 +750,7 @@ export const syncSquare = onSchedule(
       completed: completed.length,
       matched,
       unmatched,
-      unmatchedPostIts,
+      ambiguityPostIts,
       escalationsCleared,
       verifyFlagged,
     });
