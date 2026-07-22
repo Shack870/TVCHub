@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
-// TVCHub Cloud Functions.
+// TVCHub Cloud Functions (Node.js 22 runtime).
 //
 // Email ingestion runs through the Apps Script bridge (see apps-script/Code.gs),
 // which posts each new TVC referral to `ingestEmail`. The browser's manual
