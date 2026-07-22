@@ -1062,6 +1062,11 @@ function ContactLogTab({
                             ✉ Email
                           </span>
                         )}
+                        {a.via === 'square' && (
+                          <span className="rounded-full bg-emerald-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-emerald-800">
+                            Square
+                          </span>
+                        )}
                       </span>
                       <span className="font-type text-xs text-pad-inkSoft/60">
                         {formatDistanceToNow(a.ts, { addSuffix: true })}

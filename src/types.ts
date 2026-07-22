@@ -44,9 +44,10 @@ export interface ContactAttempt {
   outcome: ContactOutcome;
   notes?: string;
   by?: string; // user display name / uid
-  // Set by the CallRail / Gmail syncs for auto-logged phone & email activity.
-  via?: 'callrail' | 'email';
+  // Set by the CallRail / Gmail / Square syncs for auto-logged activity.
+  via?: 'callrail' | 'email' | 'square';
   callId?: string;
+  paymentId?: string; // Square payment id (via 'square')
   recordingUrl?: string | null;
   durationSec?: number | null;
   // Transcript analysis (advisory only — never drives stage changes).
@@ -215,6 +216,7 @@ export interface Lead {
   saleEscalatedAt?: number | null; // billing cadence raised the decision post-it
   saleNonPaymentReason?: string | null; // classifier's read on why no money moved
   salePursuitAlertAt?: number | null; // no-pursuit alarm raised (no call since promise)
+  squarePaidTotal?: number | null; // dollars collected via Square (see functions/src/squaresync.ts)
   // Audit trail for automatic stage moves (classifier-confirmed payments).
   autoStageNote?: string | null;
   autoStageAt?: number | null;
