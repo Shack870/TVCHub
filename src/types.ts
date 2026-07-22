@@ -44,8 +44,8 @@ export interface ContactAttempt {
   outcome: ContactOutcome;
   notes?: string;
   by?: string; // user display name / uid
-  // Set by the CallRail sync for auto-logged phone activity.
-  via?: 'callrail';
+  // Set by the CallRail / Gmail syncs for auto-logged phone & email activity.
+  via?: 'callrail' | 'email';
   callId?: string;
   recordingUrl?: string | null;
   durationSec?: number | null;

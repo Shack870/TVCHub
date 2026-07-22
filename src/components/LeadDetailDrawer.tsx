@@ -1057,6 +1057,11 @@ function ContactLogTab({
                             CallRail
                           </span>
                         )}
+                        {a.via === 'email' && (
+                          <span className="rounded-full bg-violet-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-violet-800">
+                            ✉ Email
+                          </span>
+                        )}
                       </span>
                       <span className="font-type text-xs text-pad-inkSoft/60">
                         {formatDistanceToNow(a.ts, { addSuffix: true })}
