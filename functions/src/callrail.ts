@@ -413,17 +413,23 @@ export const syncCallRail = onSchedule(
       // the next run sees the settled record.
       if (missedInbound && Date.now() - startedAt < 10 * 60_000) continue;
 
+      // CallRail exposes calls the moment they START. A call still in
+      // progress reports duration=null and no recording — processing it now
+      // logs a bare attempt (no duration/recording/AI summary) and the marker
+      // doc blocks any retry. Skip fresh unfinished calls WITHOUT a marker so
+      // a later run sees the settled record.
+      const inProgress = call.duration == null && Date.now() - startedAt < 3 * 3600_000;
+
       // CallRail transcribes recordings asynchronously — often minutes after
       // the call ends. If an answered+recorded call has no transcript yet and
       // is still fresh, skip it WITHOUT a marker so a later run picks it up
       // with the transcript (and therefore an AI summary) attached.
       const transcriptPending =
-        !missedInbound &&
         call.answered &&
         Boolean(call.recording_duration) &&
         (!call.transcription || call.transcription.length <= 40) &&
         Date.now() - startedAt < 3 * 3600_000;
-      if (transcriptPending) continue;
+      if (!missedInbound && (inProgress || transcriptPending)) continue;
 
       if (missedInbound) {
         // Surface the callback on the desk instead of burying it in a log —
