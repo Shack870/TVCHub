@@ -5,6 +5,7 @@ import { useUI } from '../store/useUI';
 import { isInitialLead, isPipelineLead } from '../lib/leadFlow';
 import { isBillingNote, isSystemNote } from '../lib/notes';
 import { sendToInitialLeads } from '../lib/actions';
+import { archiveMessage } from '../lib/db';
 import { daysUntilCourt } from '../lib/dates';
 import type { Lead } from '../types';
 import { NotepadCard } from '../components/NotepadCard';
@@ -46,12 +47,14 @@ function NoteTab({
   active,
   onClick,
   gold = false,
+  done = false,
 }: {
   label: string;
   open: number;
   active: boolean;
   onClick: () => void;
   gold?: boolean;
+  done?: boolean;
 }) {
   return (
     <button
@@ -69,7 +72,9 @@ function NoteTab({
           className={`ml-2 rounded-full px-2 py-0.5 text-[10px] font-black ${
             gold
               ? 'animate-pulse bg-gradient-to-b from-amber-300 to-amber-500 text-amber-950'
-              : 'bg-yellow-400 text-yellow-950'
+              : done
+                ? 'bg-emerald-500/80 text-emerald-950'
+                : 'bg-yellow-400 text-yellow-950'
           }`}
         >
           {open}
@@ -92,49 +97,48 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const [backLead, setBackLead] = useState<Lead | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Notes stuck to the top of the desk, in two tabbed stacks: human messages
-  // from TVC staff, and system-generated action items (billing escalations,
-  // cadence decisions, missed calls). Unhandled ones stay until dealt with;
-  // handled ones linger a week so you can see what was resolved.
+  // Notes stuck to the top of the desk, in three tabbed stacks: human messages
+  // from TVC staff, system-generated action items (billing escalations,
+  // cadence decisions, missed calls), and a Handled stack. Marking a note
+  // handled moves it out of its working tab immediately — the working tabs
+  // only ever show open work, so a clean slate is visible at a glance.
+  // Handled notes linger a week (or until archived) then fall away.
   const allMessages = useMessages();
-  const [noteTab, setNoteTab] = useState<'tvc' | 'action' | null>(null);
+  const [noteTab, setNoteTab] = useState<'tvc' | 'action' | 'handled' | null>(null);
   const noteTabs = useMemo(() => {
     const weekAgo = Date.now() - 7 * 86400000;
     const visible = allMessages
       .filter((m) => !m.deletedAt)
       .filter((m) => !m.handled || (m.handledAt ?? m.updatedAt) > weekAgo)
       .sort((a, b) => {
-        if (a.handled !== b.handled) return a.handled ? 1 : -1;
         // Within unhandled: no-pursuit alarms first, then billing, then newest.
-        if (!a.handled) {
+        if (!a.handled && !b.handled) {
           const rank = (m: typeof a) =>
             isBillingNote(m) && m.noPursuit ? 2 : isBillingNote(m) ? 1 : 0;
           const urgent = rank(b) - rank(a);
           if (urgent !== 0) return urgent;
+          return b.receivedAt - a.receivedAt;
         }
-        return b.receivedAt - a.receivedAt;
+        // Handled tab: most recently handled first.
+        return (b.handledAt ?? b.updatedAt) - (a.handledAt ?? a.updatedAt);
       });
-    const action = visible.filter(isSystemNote);
-    const tvc = visible.filter((m) => !isSystemNote(m));
+    const open = visible.filter((m) => !m.handled);
     return {
-      action,
-      tvc,
-      actionOpen: action.filter((m) => !m.handled).length,
-      tvcOpen: tvc.filter((m) => !m.handled).length,
+      action: open.filter(isSystemNote),
+      tvc: open.filter((m) => !isSystemNote(m)),
+      handled: visible.filter((m) => m.handled),
     };
   }, [allMessages]);
   // Until the user picks a tab, default to wherever the unhandled work is —
   // Action Items win when both tabs have open notes.
   const activeNoteTab =
-    noteTab ??
-    (noteTabs.actionOpen > 0
-      ? 'action'
-      : noteTabs.tvcOpen > 0
-        ? 'tvc'
-        : noteTabs.action.length > 0
-          ? 'action'
-          : 'tvc');
-  const notes = activeNoteTab === 'action' ? noteTabs.action : noteTabs.tvc;
+    noteTab ?? (noteTabs.action.length > 0 ? 'action' : noteTabs.tvc.length > 0 ? 'tvc' : 'action');
+  const notes =
+    activeNoteTab === 'action'
+      ? noteTabs.action
+      : activeNoteTab === 'tvc'
+        ? noteTabs.tvc
+        : noteTabs.handled;
 
   const counts = useMemo(
     () => ({
@@ -301,28 +305,46 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
 
       <div className="mb-5">{scopeToggle}</div>
 
-      {(noteTabs.tvc.length > 0 || noteTabs.action.length > 0) && (
+      {(noteTabs.tvc.length > 0 || noteTabs.action.length > 0 || noteTabs.handled.length > 0) && (
         <section className="mb-7">
           <div className="mb-3 flex items-center gap-1">
             <NoteTab
               label="TVC Messages"
-              open={noteTabs.tvcOpen}
+              open={noteTabs.tvc.length}
               active={activeNoteTab === 'tvc'}
               onClick={() => setNoteTab('tvc')}
             />
             <NoteTab
               label="Action Items"
-              open={noteTabs.actionOpen}
+              open={noteTabs.action.length}
               active={activeNoteTab === 'action'}
               onClick={() => setNoteTab('action')}
-              gold={noteTabs.action.some((m) => !m.handled && isBillingNote(m))}
+              gold={noteTabs.action.some(isBillingNote)}
             />
+            <NoteTab
+              label="Handled"
+              open={noteTabs.handled.length}
+              done
+              active={activeNoteTab === 'handled'}
+              onClick={() => setNoteTab('handled')}
+            />
+            {activeNoteTab === 'handled' && noteTabs.handled.length > 0 && (
+              <button
+                type="button"
+                onClick={() => noteTabs.handled.forEach((m) => archiveMessage(m.id))}
+                className="ml-auto rounded-md border border-manila/25 px-3 py-1.5 font-type text-[10px] font-bold uppercase tracking-widest text-manila/60 transition hover:bg-black/15 hover:text-manila"
+              >
+                Clear All
+              </button>
+            )}
           </div>
           {notes.length === 0 ? (
             <p className="rounded-lg bg-black/15 px-4 py-6 font-type text-xs text-manila/50">
               {activeNoteTab === 'action'
-                ? 'No action items on the desk.'
-                : 'No messages from TVC on the desk.'}
+                ? 'Clean slate — no action items waiting. ✓'
+                : activeNoteTab === 'tvc'
+                  ? 'Clean slate — no messages from TVC waiting. ✓'
+                  : 'Nothing handled recently.'}
             </p>
           ) : (
             // overflow stays visible so a flipped-up note can overlay the UI
