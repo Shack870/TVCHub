@@ -155,7 +155,10 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
         </p>
         <ContactChips msg={msg} />
       </div>
-      {/* curled corner — the flip affordance. Lifted look via gradient+shadow. */}
+      {/* Curled corner — the flip affordance. The bottom-right corner of the
+          gold note is peeled up-and-to-the-LEFT: the folded flap (its paper
+          underside) is the upper-left triangle pointing up-left, and the
+          exposed lower corner shows the BLUE note waiting underneath. */}
       {flippable && (
         <button
           type="button"
@@ -165,15 +168,37 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
             e.stopPropagation();
             setFlipped((v) => !v);
           }}
-          className="absolute bottom-0 right-0 flex h-10 w-12 items-end justify-end transition-transform hover:scale-110"
-          style={{
-            background:
-              'linear-gradient(315deg, #a97f22 0%, #d9ac45 30%, #ffe9a8 46%, rgba(255,255,255,0.85) 50%, transparent 53%)',
-            boxShadow: '-3px -3px 6px rgba(0,0,0,0.25)',
-            clipPath: 'polygon(100% 0, 0 100%, 100% 100%)',
-          }}
+          className="absolute -bottom-px -right-px h-12 w-14 transition-transform hover:scale-110"
+          style={{ transformOrigin: 'bottom right' }}
         >
-          <span className="pr-1 pb-0.5 font-hand text-[13px] leading-none text-yellow-950/90">
+          {/* the blue note showing through where the corner lifted away;
+              darker toward the fold line, like the flap casts a shadow */}
+          <span
+            aria-hidden
+            className="absolute inset-0"
+            style={{
+              background: 'linear-gradient(315deg, #bfdcff 0%, #8fbef5 55%, #5d8fd0 100%)',
+              clipPath: 'polygon(100% 0, 0 100%, 100% 100%)',
+            }}
+          />
+          {/* the folded-back gold corner: underside of the paper, tip up-left,
+              darkest along the fold (the hypotenuse). The shadow lives on a
+              wrapper so it follows the clipped triangle, not the box. */}
+          <span
+            aria-hidden
+            className="absolute inset-0"
+            style={{ filter: 'drop-shadow(2px 2px 2px rgba(0,0,0,0.35))' }}
+          >
+            <span
+              className="absolute inset-0"
+              style={{
+                background:
+                  'linear-gradient(135deg, #fffbe2 0%, #ffedb0 45%, #dfb14a 80%, #a97f22 100%)',
+                clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+              }}
+            />
+          </span>
+          <span className="absolute bottom-0 right-0.5 font-hand text-[12px] leading-none text-blue-950/90">
             why?
           </span>
         </button>
@@ -223,7 +248,13 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
             className={`absolute inset-0 cursor-pointer overflow-y-auto p-4 shadow-inner ${
               flipped ? '' : 'pointer-events-none'
             }`}
-            style={{ background: 'linear-gradient(180deg, #bfdcff 0%, #8fbef5 100%)' }}
+            style={{
+              background: 'linear-gradient(180deg, #bfdcff 0%, #8fbef5 100%)',
+              // Twisted a couple degrees off the gold note so its edges peek
+              // out — you can tell there's a yellow note sitting on a blue one.
+              transform: 'rotate(-2.5deg)',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+            }}
             aria-hidden={!flipped}
           >
             <p className="font-type text-[10px] font-bold uppercase tracking-widest text-blue-950/70">
