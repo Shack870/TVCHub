@@ -18,6 +18,9 @@ type View = 'grid' | 'focus';
 type Sort = 'court' | 'newest';
 type Scope = 'initial' | 'pipeline';
 
+// Handled notes are paged so an old backlog never swamps the desk.
+const HANDLED_PAGE_SIZE = 9;
+
 // Court urgency: overdue (negative) and soonest first; no-date leads sink last.
 function courtRank(l: Lead): number {
   const d = daysUntilCourt(l);
@@ -105,6 +108,11 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   // Handled notes linger a week (or until archived) then fall away.
   const allMessages = useMessages();
   const [noteTab, setNoteTab] = useState<'tvc' | 'action' | 'handled' | null>(null);
+  const [handledPage, setHandledPage] = useState(0);
+  const pickNoteTab = (tab: 'tvc' | 'action' | 'handled') => {
+    setNoteTab(tab);
+    setHandledPage(0);
+  };
   const noteTabs = useMemo(() => {
     const weekAgo = Date.now() - 7 * 86400000;
     const visible = allMessages
@@ -133,12 +141,19 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   // Action Items win when both tabs have open notes.
   const activeNoteTab =
     noteTab ?? (noteTabs.action.length > 0 ? 'action' : noteTabs.tvc.length > 0 ? 'tvc' : 'action');
+  // Clamp rather than store: if handled notes archive/expire out from under the
+  // current page, we snap back to the last page that still exists.
+  const handledPageCount = Math.max(1, Math.ceil(noteTabs.handled.length / HANDLED_PAGE_SIZE));
+  const safeHandledPage = Math.min(handledPage, handledPageCount - 1);
   const notes =
     activeNoteTab === 'action'
       ? noteTabs.action
       : activeNoteTab === 'tvc'
         ? noteTabs.tvc
-        : noteTabs.handled;
+        : noteTabs.handled.slice(
+            safeHandledPage * HANDLED_PAGE_SIZE,
+            (safeHandledPage + 1) * HANDLED_PAGE_SIZE,
+          );
 
   const counts = useMemo(
     () => ({
@@ -312,13 +327,13 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
               label="TVC Messages"
               open={noteTabs.tvc.length}
               active={activeNoteTab === 'tvc'}
-              onClick={() => setNoteTab('tvc')}
+              onClick={() => pickNoteTab('tvc')}
             />
             <NoteTab
               label="Action Items"
               open={noteTabs.action.length}
               active={activeNoteTab === 'action'}
-              onClick={() => setNoteTab('action')}
+              onClick={() => pickNoteTab('action')}
               gold={noteTabs.action.some(isBillingNote)}
             />
             <NoteTab
@@ -326,7 +341,7 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
               open={noteTabs.handled.length}
               done
               active={activeNoteTab === 'handled'}
-              onClick={() => setNoteTab('handled')}
+              onClick={() => pickNoteTab('handled')}
             />
             {activeNoteTab === 'handled' && noteTabs.handled.length > 0 && (
               <button
@@ -347,13 +362,42 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
                   : 'Nothing handled recently.'}
             </p>
           ) : (
-            // overflow stays visible so a flipped-up note can overlay the UI
-            // above it instead of being clipped by a scroll container
-            <div className="flex flex-wrap gap-5 pb-3 pt-2">
-              {notes.map((m, i) => (
-                <MessagePostIt key={m.id} msg={m} index={i} />
-              ))}
-            </div>
+            <>
+              {/* overflow stays visible so a flipped-up note can overlay the UI
+                  above it instead of being clipped by a scroll container */}
+              <div className="flex flex-wrap gap-5 pb-3 pt-2">
+                {notes.map((m, i) => (
+                  <MessagePostIt key={m.id} msg={m} index={i} />
+                ))}
+              </div>
+              {activeNoteTab === 'handled' && noteTabs.handled.length > HANDLED_PAGE_SIZE && (
+                <div className="mt-1 flex items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={safeHandledPage === 0}
+                    onClick={() => setHandledPage(Math.max(0, safeHandledPage - 1))}
+                    className="rounded-md border border-manila/25 px-3 py-1.5 font-type text-[10px] font-bold uppercase tracking-widest text-manila/60 transition enabled:hover:bg-black/15 enabled:hover:text-manila disabled:cursor-default disabled:opacity-30"
+                  >
+                    ‹ Prev
+                  </button>
+                  <span className="font-type text-[10px] font-bold uppercase tracking-widest text-manila/60">
+                    {safeHandledPage * HANDLED_PAGE_SIZE + 1}–
+                    {Math.min((safeHandledPage + 1) * HANDLED_PAGE_SIZE, noteTabs.handled.length)} of{' '}
+                    {noteTabs.handled.length}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safeHandledPage >= handledPageCount - 1}
+                    onClick={() =>
+                      setHandledPage(Math.min(handledPageCount - 1, safeHandledPage + 1))
+                    }
+                    className="rounded-md border border-manila/25 px-3 py-1.5 font-type text-[10px] font-bold uppercase tracking-widest text-manila/60 transition enabled:hover:bg-black/15 enabled:hover:text-manila disabled:cursor-default disabled:opacity-30"
+                  >
+                    Next ›
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </section>
       )}
