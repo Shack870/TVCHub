@@ -255,7 +255,12 @@ export interface Lead {
   // the case is written into the PDF app's `cases` collection.
   pdfAppSentAt?: number | null;
   pdfAppCaseId?: string | null;
-  pdfAppSentBy?: string | null; // uid, or 'auto' for the stage-change trigger
+  pdfAppSentBy?: string | null; // uid, 'auto' (stage trigger), or 'auto-retry' (sweep)
+  pdfAppSendError?: string | null; // last handoff failure message (cleared on success)
+  pdfAppSendErrorAt?: number | null;
+  pdfAppSendAttempts?: number | null; // consecutive failed sends (reset on success)
+  pdfAppFailFlaggedAt?: number | null; // Action Item post-it raised after max attempts
+  pdfAppUpdatedAt?: number | null; // last post-handoff court-date push to the PDF app
 
   // --- Meta ---
   createdAt: number;

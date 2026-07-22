@@ -1,5 +1,6 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onDocumentUpdated } from "firebase-functions/v2/firestore";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 import { defineSecret } from "firebase-functions/params";
 import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
@@ -30,6 +31,16 @@ const PDFAPP_SA_KEY = defineSecret("PDFAPP_SA_KEY");
 const PDF_PROJECT = "ironrockpdf";
 const FS_BASE = `https://firestore.googleapis.com/v1/projects/${PDF_PROJECT}/databases/(default)/documents`;
 const WORKSPACE_ID = "ironrocklaw";
+
+// When the auto-handoff first went live. The retry sweep only auto-sends
+// leads that completed intake AFTER this moment — leads already at
+// intake_complete before the feature shipped were deliberately excluded
+// (they may have been hand-entered in the PDF app; dedup would usually catch
+// that, but a mistyped case number there would create a duplicate).
+const HANDOFF_LIVE_SINCE = Date.parse("2026-07-22T21:10:00Z");
+
+const MAX_SEND_ATTEMPTS = 3;
+const HOUR = 3600_000;
 
 const b64url = (s: string | Buffer): string =>
   Buffer.from(s).toString("base64url");
@@ -123,9 +134,16 @@ interface LeadDoc {
   nextCourtType?: string;
   courtDateHistory?: { date?: string; time?: string; type?: string; reason?: string }[];
   financing?: { totalFee?: number };
+  saleAmount?: number | null;
   stage?: string;
+  intakeCompleteAt?: number | null;
   pdfAppSentAt?: number | null;
   pdfAppCaseId?: string | null;
+  pdfAppSendError?: string | null;
+  pdfAppSendErrorAt?: number | null;
+  pdfAppSendAttempts?: number | null;
+  pdfAppFailFlaggedAt?: number | null;
+  deletedAt?: number | null;
 }
 
 const isoDay = (): string => new Date().toISOString().slice(0, 10);
@@ -200,15 +218,21 @@ function courtDateKind(type: string | undefined): "arraignment" | "pretrial" | "
   return "unknown";
 }
 
-// Build the full caseData object in the exact shape of the PDF app's
-// blankCase(), populated the same way its TVC importer populates a case.
-export function mapLeadToCaseData(lead: LeadDoc): Record<string, unknown> {
-  const today = isoDay();
-  const nowIso = new Date().toISOString();
-  const addr = splitAddress(lead.address);
+interface CourtDateEntry {
+  date: string;
+  time: string;
+  type: string;
+  reason: string;
+}
 
-  // All known court dates: prior entries plus the current next date, sorted
-  // ascending like the PDF app keeps them.
+// All known court dates (prior entries plus the current next date), sorted
+// ascending like the PDF app keeps them, with the derived charge dates.
+// Shared by the initial handoff mapping and the post-handoff date push.
+function buildCourtDates(lead: LeadDoc): {
+  courtDates: CourtDateEntry[];
+  arraignmentDate: string;
+  trialDate: string;
+} {
   const courtDates = [
     ...(lead.courtDateHistory ?? []).map((c) => ({
       date: toIsoDate(c.date) || String(c.date ?? ""),
@@ -232,6 +256,30 @@ export function mapLeadToCaseData(lead: LeadDoc): Record<string, unknown> {
   const arraignmentDate =
     courtDates.find((d) => courtDateKind(d.type) === "arraignment")?.date ??
     (courtDates[0]?.date ?? "");
+
+  return { courtDates, arraignmentDate, trialDate };
+}
+
+// The lead's real fee for the PDF app's retainer.fee field. The PDF app keeps
+// it as a bare numeric string — firmDefaults.retainerFee is '1125', the form
+// input is text with placeholder "1125", and templates interpolate
+// `$${caseData.retainer.fee}` — so no "$", no thousands separators.
+// financing.totalFee is the authoritative quoted fee when financing exists;
+// saleAmount (the dollar figure from the sale call) is the fallback.
+function retainerFeeOf(lead: LeadDoc): string {
+  const n = lead.financing?.totalFee ?? lead.saleAmount;
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "";
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// Build the full caseData object in the exact shape of the PDF app's
+// blankCase(), populated the same way its TVC importer populates a case.
+export function mapLeadToCaseData(lead: LeadDoc): Record<string, unknown> {
+  const today = isoDay();
+  const nowIso = new Date().toISOString();
+  const addr = splitAddress(lead.address);
+
+  const { courtDates, arraignmentDate, trialDate } = buildCourtDates(lead);
 
   const violations = (lead.tickets ?? []).map((t) => t.violation).filter(Boolean) as string[];
   const chargeDescription = lead.charge || violations.join("; ");
@@ -309,7 +357,9 @@ export function mapLeadToCaseData(lead: LeadDoc): Record<string, unknown> {
       priorPleaDate: "",
     },
     prosecutor: { name: "", email: "", phone: "", fax: "" },
-    retainer: { fee: "", trialFee: "", matterDescription: "" },
+    // trialFee/matterDescription stay blank: the PDF app fills its own firm
+    // defaults (ensureRetainerDefaults) for anything we leave empty.
+    retainer: { fee: retainerFeeOf(lead), trialFee: "", matterDescription: "" },
     offer: { terms: "", responseDeadline: "", notes: "", sentAt: "" },
     flags: {
       absentiaProsecutorObjected: false,
@@ -489,14 +539,128 @@ export async function handoffLead(
     logger.info("PDF handoff: case created", { leadId, caseId });
   }
 
+  // Success clears any failure bookkeeping from earlier attempts so the UI
+  // error state disappears and the retry sweep stops considering the lead.
   await ref.update({
     pdfAppSentAt: Date.now(),
     pdfAppCaseId: caseId,
     pdfAppSentBy: sentBy,
+    pdfAppSendError: null,
+    pdfAppSendErrorAt: null,
+    pdfAppSendAttempts: 0,
     updatedAt: Date.now(),
   });
 
   return { caseId, duplicate };
+}
+
+// Failure bookkeeping shared by the trigger and the retry sweep: stamp the
+// error on the lead, count the attempt, and after the final consecutive
+// failure put an Action Item post-it on the desk (exactly once, guarded by
+// pdfAppFailFlaggedAt) so a dropped case is never silent.
+async function recordHandoffFailure(leadId: string, err: unknown): Promise<void> {
+  const db = getFirestore();
+  const ref = db.collection("leads").doc(leadId);
+  const snap = await ref.get();
+  if (!snap.exists) return;
+  const lead = snap.data() as LeadDoc;
+  const now = Date.now();
+  const attempts = (lead.pdfAppSendAttempts ?? 0) + 1;
+  const message = err instanceof Error ? err.message : String(err);
+
+  await ref.update({
+    pdfAppSendError: message,
+    pdfAppSendErrorAt: now,
+    pdfAppSendAttempts: attempts,
+    ...(attempts >= MAX_SEND_ATTEMPTS && !lead.pdfAppFailFlaggedAt
+      ? { pdfAppFailFlaggedAt: now }
+      : {}),
+    updatedAt: now,
+  });
+
+  if (attempts < MAX_SEND_ATTEMPTS || lead.pdfAppFailFlaggedAt) return;
+
+  const name = lead.name || "(unnamed)";
+  await db.collection("messages").add({
+    kind: "tvc_message",
+    source: "system",
+    from: "PDF Handoff",
+    fromName: "PDF Handoff",
+    subject: `Case failed to reach PDF app — ${name}`,
+    message:
+      `${name} is intake-complete but ${attempts} attempts to create their case in the ` +
+      `Iron Rock PDF app have failed. The case must be entered or the send fixed by hand.\n\n` +
+      `Last error: ${message}\n` +
+      `Lead: ${leadId}` +
+      (lead.tvcCaseNumber ? ` · TVC #${lead.tvcCaseNumber}` : "") +
+      (lead.phone ? ` · ${lead.phone}` : ""),
+    tvcCaseNumber: lead.tvcCaseNumber ?? null,
+    memberName: name,
+    leadId,
+    phone: lead.phone ?? null,
+    email: lead.email ?? null,
+    gmailMessageId: null,
+    receivedAt: now,
+    handled: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+  logger.warn("PDF handoff: gave up after max attempts, post-it created", { leadId, attempts });
+}
+
+// ---------- Post-handoff court-date sync ----------
+
+// Push ONLY the court-date-derived fields onto an existing PDF-app case via
+// updateMask so nothing else in caseData is touched. Names, phones, and other
+// intake fields are deliberately NOT synced after handoff: they rarely change,
+// and the attorneys edit their copy in the PDF app — overwriting that work
+// with a stale TVCHub value would be worse than a missed edit.
+async function pushCourtDatesToCase(
+  token: string,
+  caseId: string,
+  lead: LeadDoc,
+): Promise<void> {
+  const { courtDates, arraignmentDate, trialDate } = buildCourtDates(lead);
+  const paths = [
+    "caseData.courtDates",
+    "caseData.charge.arraignmentDate",
+    "caseData.charge.trialDate",
+    "caseData.updatedAt",
+    "updatedAt",
+  ];
+  const qs = paths
+    .map((p) => `updateMask.fieldPaths=${encodeURIComponent(p)}`)
+    .join("&");
+  const body = {
+    fields: toFsFields({
+      caseData: {
+        courtDates,
+        charge: { arraignmentDate, trialDate },
+        updatedAt: isoDay(),
+      },
+      updatedAt: new Date(),
+    }),
+  };
+  // currentDocument.exists guards against resurrecting a case the attorneys
+  // deleted in the PDF app as an empty stub containing only court dates.
+  const res = await fetch(
+    `${FS_BASE}/cases/${encodeURIComponent(caseId)}?${qs}&currentDocument.exists=true`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw new Error(`PDF app court-date update ${res.status}: ${await res.text()}`);
+}
+
+function courtFieldsChanged(before: LeadDoc, after: LeadDoc): boolean {
+  return (
+    (before.nextCourtDate ?? null) !== (after.nextCourtDate ?? null) ||
+    (before.nextCourtTime ?? "") !== (after.nextCourtTime ?? "") ||
+    (before.nextCourtType ?? "") !== (after.nextCourtType ?? "") ||
+    JSON.stringify(before.courtDateHistory ?? []) !== JSON.stringify(after.courtDateHistory ?? [])
+  );
 }
 
 // ---------- Entry points ----------
@@ -521,24 +685,97 @@ export const sendToPdfApp = onCall(
 // never been sent), push it to the PDF app with sentBy 'auto'. Leads already
 // at intake_complete before this feature shipped are NOT auto-sent — they may
 // have been manually entered in the PDF app already; use the button instead.
+//
+// The same trigger also owns the post-handoff court-date sync: when a lead
+// that already has a PDF-app case gets a changed next court date (or history),
+// the new dates are pushed onto that case.
 export const autoSendToPdfApp = onDocumentUpdated(
   { document: "leads/{leadId}", secrets: [PDFAPP_SA_KEY] },
   async (event) => {
     const before = event.data?.before.data() as LeadDoc | undefined;
     const after = event.data?.after.data() as LeadDoc | undefined;
     if (!before || !after) return;
+    const leadId = event.params.leadId;
+
     const becameComplete =
       before.stage !== "intake_complete" && after.stage === "intake_complete";
-    if (!becameComplete || after.pdfAppSentAt) return;
-    try {
-      await handoffLead(event.params.leadId, "auto", PDFAPP_SA_KEY.value());
-    } catch (e) {
-      // Log only — the manual button remains available as the retry path, and
-      // throwing would just make the trigger retry against the same data.
-      logger.error("Auto PDF handoff failed", {
-        leadId: event.params.leadId,
-        error: String(e),
-      });
+    if (becameComplete && !after.pdfAppSentAt) {
+      try {
+        await handoffLead(leadId, "auto", PDFAPP_SA_KEY.value());
+      } catch (e) {
+        // Stamp the failure so the UI shows it and the retry sweep picks it
+        // up — throwing would just make the trigger retry against the same
+        // data immediately.
+        logger.error("Auto PDF handoff failed", { leadId, error: String(e) });
+        await recordHandoffFailure(leadId, e);
+      }
+      return;
+    }
+
+    // Court dates move after intake (continuances, reset dockets). Keep the
+    // PDF-app case's calendar current; everything else stays hands-off.
+    if (after.pdfAppCaseId && courtFieldsChanged(before, after)) {
+      try {
+        const token = await datastoreToken(PDFAPP_SA_KEY.value());
+        await pushCourtDatesToCase(token, after.pdfAppCaseId, after);
+        await event.data!.after.ref.update({ pdfAppUpdatedAt: Date.now() });
+        logger.info("PDF handoff: court dates pushed", {
+          leadId,
+          caseId: after.pdfAppCaseId,
+          nextCourtDate: after.nextCourtDate ?? null,
+        });
+      } catch (e) {
+        logger.error("PDF app court-date push failed", { leadId, error: String(e) });
+      }
+    }
+  },
+);
+
+// Retry sweep: hourly safety net so a failed auto-send never silently drops a
+// case. Picks up intake-complete leads that are unsent because
+//   (a) the handoff failed (pdfAppSendError stamped), or
+//   (b) the trigger never fired at all (no error, no stamp, intake completed
+//       over an hour ago — but only after HANDOFF_LIVE_SINCE; see above).
+// Each lead gets up to MAX_SEND_ATTEMPTS tries, then recordHandoffFailure
+// raises the Action Item post-it once and the sweep leaves it alone.
+export const retryPdfHandoff = onSchedule(
+  { schedule: "every 60 minutes", secrets: [PDFAPP_SA_KEY], timeoutSeconds: 300 },
+  async () => {
+    const db = getFirestore();
+    const snap = await db
+      .collection("leads")
+      .where("stage", "==", "intake_complete")
+      .get();
+    const now = Date.now();
+    let retried = 0;
+    let succeeded = 0;
+
+    for (const doc of snap.docs) {
+      const lead = doc.data() as LeadDoc;
+      if (lead.deletedAt || lead.pdfAppSentAt) continue;
+
+      const failedBefore = Boolean(lead.pdfAppSendError);
+      const neverFired =
+        !failedBefore &&
+        typeof lead.intakeCompleteAt === "number" &&
+        lead.intakeCompleteAt > HANDOFF_LIVE_SINCE &&
+        now - lead.intakeCompleteAt > HOUR;
+      if (!failedBefore && !neverFired) continue;
+      if ((lead.pdfAppSendAttempts ?? 0) >= MAX_SEND_ATTEMPTS) continue; // already flagged
+
+      retried++;
+      try {
+        await handoffLead(doc.id, "auto-retry", PDFAPP_SA_KEY.value());
+        succeeded++;
+        logger.info("PDF handoff retry succeeded", { leadId: doc.id });
+      } catch (e) {
+        logger.error("PDF handoff retry failed", { leadId: doc.id, error: String(e) });
+        await recordHandoffFailure(doc.id, e);
+      }
+    }
+
+    if (retried > 0) {
+      logger.info("PDF handoff retry sweep complete", { retried, succeeded });
     }
   },
 );

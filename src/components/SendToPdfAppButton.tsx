@@ -5,9 +5,10 @@ import { functions } from '../firebase';
 import { notify } from '../store/useToast';
 import type { Lead } from '../types';
 
-// "Send to PDF App" handoff control for intake-complete leads. Three states:
+// "Send to PDF App" handoff control for intake-complete leads. Four states:
 //   not sent -> actionable button (calls the sendToPdfApp callable)
 //   sending  -> disabled with spinner
+//   failed   -> red retry button (auto-send stamped pdfAppSendError)
 //   sent     -> green check + relative date, with a small resend affordance
 // `tone` matches the surface it sits on: 'light' for the manila table rows,
 // 'dark' for the drawer's felt action bar.
@@ -20,6 +21,8 @@ export function SendToPdfAppButton({
 }) {
   const [sending, setSending] = useState(false);
   const sent = Boolean(lead.pdfAppSentAt);
+  // Error fields are cleared server-side on any successful send.
+  const failed = !sent && Boolean(lead.pdfAppSendError);
 
   const send = async () => {
     if (sending) return;
@@ -77,17 +80,29 @@ export function SendToPdfAppButton({
   return (
     <button
       className={`btn-ghost px-2 py-1 text-xs disabled:cursor-wait disabled:opacity-50 ${
-        tone === 'dark' ? 'text-manila' : 'text-pad-ink'
+        failed
+          ? tone === 'dark'
+            ? 'font-bold text-red-300'
+            : 'font-bold text-red-700'
+          : tone === 'dark'
+            ? 'text-manila'
+            : 'text-pad-ink'
       }`}
       onClick={send}
       disabled={sending}
-      title="Create this case in the Iron Rock PDF app"
+      title={
+        failed
+          ? `Auto-send failed: ${lead.pdfAppSendError} — click to retry`
+          : 'Create this case in the Iron Rock PDF app'
+      }
     >
       {sending ? (
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
           Sending…
         </span>
+      ) : failed ? (
+        '⚠ Send failed — retry'
       ) : (
         'Send to PDF App →'
       )}
