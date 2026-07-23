@@ -43,6 +43,73 @@ const PLAN_STALL_DAYS = 35;
 
 const ACTIVE_STAGES = ["new", "callback", "pitched", "attorney_call", "nurture"];
 
+// --- Settled-plan check (mirrors src/lib/paymentLedger.ts) ------------------
+// Functions can't import from src/, so the unified ledger's settled rules are
+// replicated here — keep in sync with paymentLedger.ts:
+//   collected = squarePaidTotal + manual financing.payments that are NOT the
+//               same money as a Square charge (a manual entry is dropped when
+//               a Square charge of the same amount within $1 landed within
+//               5 days of it — the Square copy wins);
+//   fee       = financing.totalFee + warrantFee when set, else saleAmount,
+//               else null (unknown);
+//   settled   = saleStatus 'paid_full', or fee known and collected >= fee.
+// An unknown fee is NOT settled — a financed lead with payments but no fee on
+// file stays on the stall watch.
+
+const DUPLICATE_AMOUNT_TOLERANCE = 1; // dollars
+const DUPLICATE_WINDOW_MS = 5 * 86400_000; // ± 5 days
+const SQUARE_NOTE_AMOUNT = /Square payment received — \$([\d,]+(?:\.\d+)?)/;
+
+export function isSettledPlan(d: FirebaseFirestore.DocumentData): boolean {
+  if (d.saleStatus === "paid_full") return true;
+
+  const fin = (d.financing ?? {}) as {
+    totalFee?: number;
+    warrantFee?: number;
+    payments?: { date?: number; amount?: number }[];
+  };
+  const manualFee = (fin.totalFee ?? 0) + (fin.warrantFee ?? 0);
+  const fee =
+    manualFee > 0
+      ? manualFee
+      : typeof d.saleAmount === "number" && d.saleAmount > 0
+        ? (d.saleAmount as number)
+        : null;
+  if (fee === null) return false; // unknown fee ≠ paid off
+
+  // Individual Square charges, parsed from the sync's contact-attempt trail
+  // (used only for the duplicate guard; the total comes from squarePaidTotal).
+  const attempts: { ts?: number; via?: string; notes?: string }[] = Array.isArray(
+    d.contactAttempts,
+  )
+    ? d.contactAttempts
+    : [];
+  const square: { ts: number; amount: number }[] = [];
+  for (const a of attempts) {
+    if (a?.via !== "square" || typeof a.ts !== "number") continue;
+    const m = SQUARE_NOTE_AMOUNT.exec(a.notes ?? "");
+    if (!m) continue;
+    const amount = parseFloat(m[1].replace(/,/g, ""));
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    square.push({ ts: a.ts, amount });
+  }
+
+  const manualPayments = Array.isArray(fin.payments) ? fin.payments : [];
+  const manualCollected = manualPayments.reduce((sum, p) => {
+    const amount = typeof p?.amount === "number" ? p.amount : 0;
+    const date = typeof p?.date === "number" ? p.date : 0;
+    const duplicatesSquare = square.some(
+      (s) =>
+        Math.abs(s.amount - amount) <= DUPLICATE_AMOUNT_TOLERANCE &&
+        Math.abs(s.ts - date) <= DUPLICATE_WINDOW_MS,
+    );
+    return duplicatesSquare ? sum : sum + amount;
+  }, 0);
+
+  const collected = ((d.squarePaidTotal as number) ?? 0) + manualCollected;
+  return collected >= fee;
+}
+
 // Outcomes that mean a real two-way conversation happened. A voicemail or
 // no-answer is NOT a contact — the chase keeps running until one of these
 // lands. Mirrors CONVERSATION_OUTCOMES in src/lib/leadFlow.ts.
@@ -417,6 +484,9 @@ export const cadenceSweep = onSchedule(
     for (const doc of financedSnap.docs) {
       const d = doc.data();
       if (d.deletedAt) continue;
+      // Paid-off plans (per the unified ledger — see isSettledPlan) are done;
+      // silence is expected, not a stall. Only genuinely active plans are watched.
+      if (isSettledPlan(d)) continue;
       const flaggedAt = (d.planStallFlaggedAt as number) ?? 0;
       if (flaggedAt && now - flaggedAt < PLAN_STALL_DAYS * DAY) continue;
 
