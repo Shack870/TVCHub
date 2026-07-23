@@ -16,6 +16,7 @@ import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import type { FollowUpType, Lead } from '../types';
 import { completeFollowUp } from '../lib/actions';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 interface CalEvent {
   leadId: string;
@@ -72,6 +73,8 @@ export function CalendarView() {
   const selectLead = useUI((s) => s.selectLead);
   const [cursor, setCursor] = useState(new Date());
   const [selected, setSelected] = useState(new Date());
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const events = useMemo(() => leads.flatMap(leadEvents), [leads]);
 
@@ -108,6 +111,21 @@ export function CalendarView() {
   const selectedEvents = (byDay.get(selectedKey) ?? []).sort(
     (a, b) => (a.kind === b.kind ? 0 : a.kind === 'court' ? 1 : -1),
   );
+
+  // Marks every item currently shown in the Overdue panel done, via the same
+  // completeFollowUp mutation as each row's individual "Done" button.
+  const clearAllOverdue = async () => {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      for (const e of overdue) {
+        const lead = leads.find((l) => l.id === e.leadId);
+        if (lead && e.followUpId) await completeFollowUp(lead, e.followUpId);
+      }
+    } finally {
+      setClearing(false);
+    }
+  };
 
   return (
     <div>
@@ -217,7 +235,20 @@ export function CalendarView() {
         {/* Side panel: overdue/today + selected day */}
         <div className="space-y-4">
           {overdue.length > 0 && (
-            <Panel title={`Overdue (${overdue.length})`} tone="red">
+            <Panel
+              title={`Overdue (${overdue.length})`}
+              tone="red"
+              action={
+                <button
+                  type="button"
+                  disabled={clearing}
+                  onClick={() => setConfirmClear(true)}
+                  className="rounded-md border border-manila/25 px-3 py-1.5 font-type text-[10px] font-bold uppercase tracking-widest text-manila/60 transition hover:bg-black/15 hover:text-manila disabled:opacity-50"
+                >
+                  {clearing ? 'Clearing…' : 'Clear All'}
+                </button>
+              }
+            >
               {overdue.map((e, i) => (
                 <EventRow key={i} e={e} onOpen={() => selectLead(e.leadId)} leads={leads} />
               ))}
@@ -243,6 +274,17 @@ export function CalendarView() {
           </Panel>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmClear}
+        title="Clear all overdue?"
+        message={`Mark all ${overdue.length} overdue follow-up${overdue.length === 1 ? '' : 's'} as done. Each lead's cadence will schedule its next touch as usual.`}
+        confirmLabel={`Clear ${overdue.length}`}
+        cancelLabel="Cancel"
+        tone="danger"
+        onClose={() => setConfirmClear(false)}
+        onConfirm={() => void clearAllOverdue()}
+      />
     </div>
   );
 }
@@ -250,17 +292,22 @@ export function CalendarView() {
 function Panel({
   title,
   tone = 'neutral',
+  action,
   children,
 }: {
   title: string;
   tone?: 'neutral' | 'red' | 'green';
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const ring =
     tone === 'red' ? 'ring-pad-red/40' : tone === 'green' ? 'ring-emerald-600/30' : 'ring-white/10';
   return (
     <div className={`rounded-2xl bg-black/20 p-3 ring-1 ${ring}`}>
-      <h2 className="mb-2 font-hand text-xl text-white">{title}</h2>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="font-hand text-xl text-white">{title}</h2>
+        {action}
+      </div>
       <div className="space-y-2">{children}</div>
     </div>
   );
