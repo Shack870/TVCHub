@@ -3,6 +3,7 @@ import { defineSecret } from "firebase-functions/params";
 import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
 import { randomUUID } from "node:crypto";
+import { stampHeartbeat } from "./heartbeat.js";
 
 // CallRail → TVCHub phone-activity sync.
 //
@@ -352,7 +353,10 @@ export const syncCallRail = onSchedule(
   async () => {
     const db = getFirestore();
     const calls = await fetchRecentCalls(CALLRAIL_API_KEY.value());
-    if (!calls.length) return;
+    if (!calls.length) {
+      await stampHeartbeat("syncCallRail"); // quiet phones still = healthy run
+      return;
+    }
 
     // Phone -> lead index over recent leads (covers the active board plus
     // months of history; older completed cases don't get phone activity).
@@ -646,5 +650,6 @@ export const syncCallRail = onSchedule(
       attemptsLogged: logged,
       missedCallPostIts: postIts,
     });
+    await stampHeartbeat("syncCallRail");
   },
 );

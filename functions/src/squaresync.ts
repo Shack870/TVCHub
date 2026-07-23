@@ -2,6 +2,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { defineSecret } from "firebase-functions/params";
 import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
+import { stampHeartbeat } from "./heartbeat.js";
 
 // Square → TVCHub payments sync.
 //
@@ -757,5 +758,6 @@ export const syncSquare = onSchedule(
       escalationsCleared,
       verifyFlagged,
     });
+    await stampHeartbeat("syncSquare");
   },
 );

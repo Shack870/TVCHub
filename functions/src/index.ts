@@ -21,3 +21,4 @@ export { syncEmail } from "./emailsync.js";
 export { syncSquare } from "./squaresync.js";
 export { cadenceSweep } from "./cadence.js";
 export { sendToPdfApp, autoSendToPdfApp, retryPdfHandoff } from "./pdfhandoff.js";
+export { watchdog } from "./watchdog.js";

@@ -3,6 +3,7 @@ import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
 import { ensureFollowUp } from "./callrail.js";
 import { motionsDeadlineFor, type MotionsDeadline } from "./motionsDeadline.js";
+import { stampHeartbeat } from "./heartbeat.js";
 
 // Daily contact-cadence sweep (7:00 AM Central, before the calling day).
 //
@@ -624,5 +625,6 @@ export const cadenceSweep = onSchedule(
       decisionPostIts: flagged,
       stalledPlanPostIts: stalledPlans,
     });
+    await stampHeartbeat("cadenceSweep");
   },
 );

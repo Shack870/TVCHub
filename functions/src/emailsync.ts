@@ -3,6 +3,7 @@ import { defineSecret } from "firebase-functions/params";
 import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
 import { createSign } from "node:crypto";
+import { stampHeartbeat } from "./heartbeat.js";
 
 // office@ Gmail → TVCHub email-activity sync.
 //
@@ -203,5 +204,6 @@ export const syncEmail = onSchedule(
 
     await stateRef.set({ lastSyncAt: Date.now() }, { merge: true });
     logger.info("Email sync complete", { sentLogged, repliesLogged });
+    await stampHeartbeat("syncEmail");
   },
 );
