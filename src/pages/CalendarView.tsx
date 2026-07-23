@@ -14,9 +14,11 @@ import {
   startOfWeek,
 } from 'date-fns';
 import { useLeads } from '../store/useLeads';
+import { fmtShort } from '../lib/dates';
 import { useUI } from '../store/useUI';
 import type { FollowUpType, Lead } from '../types';
 import { completeFollowUp } from '../lib/actions';
+import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { Modal } from '../components/ui/Modal';
 
@@ -24,7 +26,7 @@ interface CalEvent {
   leadId: string;
   leadName: string;
   date: Date;
-  kind: 'followup' | 'court';
+  kind: 'followup' | 'court' | 'motions';
   type?: FollowUpType;
   note?: string;
   followUpId?: string;
@@ -65,6 +67,18 @@ function leadEvents(lead: Lead): CalEvent[] {
     const d = parseISO(lead.nextCourtDate);
     if (!isNaN(d.getTime())) {
       out.push({ leadId: lead.id, leadName: lead.name, date: d, kind: 'court' });
+      // The derived motions-filing deadline rides along as its own event —
+      // visually distinct from the court appearance (blue ink, not red).
+      const ddl = motionsDeadlineFor(lead);
+      if (ddl) {
+        out.push({
+          leadId: lead.id,
+          leadName: lead.name,
+          date: parseISO(ddl.date),
+          kind: 'motions',
+          note: ddl.rule === 'MO-5biz' ? 'MO 5-business-day rule' : undefined,
+        });
+      }
     }
   }
   return out;
@@ -111,8 +125,9 @@ export function CalendarView() {
   const todays = byDay.get(todayKey)?.filter((e) => e.kind === 'followup') ?? [];
 
   const selectedKey = format(selected, 'yyyy-MM-dd');
+  const kindOrder = { followup: 0, motions: 1, court: 2 } as const;
   const selectedEvents = (byDay.get(selectedKey) ?? []).sort(
-    (a, b) => (a.kind === b.kind ? 0 : a.kind === 'court' ? 1 : -1),
+    (a, b) => kindOrder[a.kind] - kindOrder[b.kind],
   );
 
   // Marks every item currently shown in the Overdue panel done, via the same
@@ -205,11 +220,16 @@ export function CalendarView() {
                         className={`block w-full truncate rounded px-1 py-0.5 text-left font-type text-[10px] transition hover:brightness-95 ${
                           e.kind === 'court'
                             ? 'bg-pad-red/15 text-pad-red'
-                            : 'bg-amber-500/20 text-amber-800'
+                            : e.kind === 'motions'
+                              ? 'bg-sky-700/10 italic text-sky-800'
+                              : 'bg-amber-500/20 text-amber-800'
                         }`}
                       >
-                        {e.kind === 'court' ? '⚖ ' : ''}
-                        {e.leadName.split(' ')[0]}
+                        {e.kind === 'court'
+                          ? `⚖ ${e.leadName.split(' ')[0]}`
+                          : e.kind === 'motions'
+                            ? `MOTIONS DDL — ${e.leadName.split(' ')[0]}`
+                            : e.leadName.split(' ')[0]}
                       </button>
                     ))}
                     {evs.length > 3 && (
@@ -235,6 +255,9 @@ export function CalendarView() {
             </span>
             <span className="flex items-center gap-1">
               <span className="h-2.5 w-2.5 rounded-sm bg-pad-red/40" /> Court date
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-2.5 w-2.5 rounded-sm bg-sky-700/40" /> Motions deadline
             </span>
           </div>
         </div>
@@ -359,18 +382,25 @@ function DayCardModal({
   // Same universe the month grid draws from (active court dates + open
   // follow-ups), plus the day's already-handled follow-ups so the page reads
   // like a real day sheet — done lines get struck through, not erased.
-  const { courts, open, handled } = useMemo(() => {
+  const { courts, motions, open, handled } = useMemo(() => {
     const courts: Lead[] = [];
+    const motions: { lead: Lead; rule: string }[] = [];
     const open: { lead: Lead; f: NonNullable<Lead['followUps']>[number] }[] = [];
     const handled: typeof open = [];
     for (const lead of leads) {
-      if (
-        lead.nextCourtDate === key &&
+      const activeCase =
         !lead.caseDismissed &&
         lead.stage !== 'intake_complete' &&
-        lead.stage !== 'lost'
-      ) {
+        lead.stage !== 'lost';
+      if (lead.nextCourtDate === key && activeCase) {
         courts.push(lead);
+      }
+      // Derived motions-filing deadlines land on their own line of the day
+      // sheet — kept OUT of the docket count so they never read as a court
+      // appearance.
+      if (activeCase) {
+        const ddl = motionsDeadlineFor(lead);
+        if (ddl?.date === key) motions.push({ lead, rule: ddl.rule });
       }
       for (const f of lead.followUps ?? []) {
         if (format(new Date(f.dueAt), 'yyyy-MM-dd') !== key) continue;
@@ -379,7 +409,7 @@ function DayCardModal({
     }
     open.sort((a, b) => a.f.dueAt - b.f.dueAt);
     handled.sort((a, b) => a.f.dueAt - b.f.dueAt);
-    return { courts, open, handled };
+    return { courts, motions, open, handled };
   }, [leads, key]);
 
   const paper = 'linear-gradient(180deg, #fdf6cf 0%, #f7edb9 100%)';
@@ -443,7 +473,7 @@ function DayCardModal({
               </div>
             </div>
 
-            {docket === 0 && handled.length === 0 ? (
+            {docket === 0 && motions.length === 0 && handled.length === 0 ? (
               <p className="-rotate-2 py-8 text-center font-hand text-2xl text-pad-ink/50">
                 Nothing on the docket — enjoy the quiet day.
               </p>
@@ -481,6 +511,30 @@ function DayCardModal({
                     </button>
                   );
                 })}
+
+                {motions.length > 0 && (
+                  <div className="py-2.5">
+                    <p className="font-type text-[10px] font-bold uppercase tracking-widest text-sky-800/70">
+                      Motions deadlines — last day to file
+                    </p>
+                    {motions.map(({ lead, rule }) => (
+                      <button
+                        key={`ddl-${lead.id}`}
+                        type="button"
+                        onClick={() => onOpenLead(lead.id)}
+                        className="block w-full py-1 text-left transition hover:bg-black/5"
+                      >
+                        <p className="truncate font-hand text-xl leading-tight text-sky-800">
+                          ✎ {lead.name} — motions ddl
+                        </p>
+                        <p className="font-type text-[10px] text-pad-inkSoft/60">
+                          court {fmtShort(lead.nextCourtDate)}
+                          {rule === 'MO-5biz' ? ' · MO 5-business-day rule' : ''}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {open.map(({ lead, f }) => (
                   <div key={`fu-${lead.id}-${f.id}`} className="flex items-center gap-2 py-2.5">
@@ -561,7 +615,9 @@ function EventRow({
         <p className="truncate font-type text-xs text-pad-inkSoft">
           {e.kind === 'court'
             ? `Court date${lead?.nextCourtType ? ' · ' + lead.nextCourtType : ''}`
-            : `${FOLLOWUP_LABEL[e.type!]}${e.note ? ' · ' + e.note : ''}`}
+            : e.kind === 'motions'
+              ? `Motions filing deadline${e.note ? ' · ' + e.note : ''}`
+              : `${FOLLOWUP_LABEL[e.type!]}${e.note ? ' · ' + e.note : ''}`}
         </p>
       </button>
       {e.kind === 'followup' && lead && e.followUpId && (

@@ -206,6 +206,12 @@ export interface Lead {
   lastConnectedAt?: number | null; // last real two-way conversation
   cadenceExhaustedAt?: number | null; // chase gave up after max attempts
   courtPassedNotifiedAt?: number | null; // court date passed while undecided
+  // Retained-side motions-deadline reminder guards (see cadence.ts). Each
+  // fires once per court date: motionsRemindFor holds the court date the
+  // guards cover, so a continuance (new date) re-arms both.
+  motionsRemind7At?: number | null; // "deadline in 7 days" post-it raised
+  motionsRemindDayAt?: number | null; // "deadline TODAY" post-it raised
+  motionsRemindFor?: string | null; // ISO court date the guards apply to
 
   // Sale rollup from call analysis (see functions/src/callrail.ts). The
   // promised_unpaid state drives the gold "SAID YES · COLLECT" treatment.

@@ -55,10 +55,14 @@ export const CONVERSATION_OUTCOMES: ContactOutcome[] = [
 // Mirrors MAX_CHASE_ATTEMPTS in functions/src/cadence.ts.
 export const MAX_CHASE_ATTEMPTS = 8;
 
-// Once the next touch would land inside this window before the court date,
-// the chase stands down and the free court-reminder remarketing is the final
-// hook. Mirrors CHASE_COURT_BUFFER_DAYS in functions/src/cadence.ts.
-export const CHASE_COURT_BUFFER_DAYS = 21;
+// The cadence engine's chase hard-stops once the next touch would land AFTER
+// the lead's motions-filing deadline (see src/lib/motionsDeadline.ts and the
+// mirror in functions/src/cadence.ts) — after that the free court-reminder
+// remarketing is the final hook. The Ripe queue keeps showing the lead all
+// the way through the motions window (with escalating deadline tags) and only
+// hands off for the last week before court, when the week-before/day-before
+// reminders own it.
+export const RIPE_COURT_MIN_DAYS = 7;
 
 // Has a real two-way conversation ever happened on this lead?
 export function hasConversation(lead: Lead): boolean {
@@ -88,12 +92,13 @@ function courtInDays(lead: Lead): number | null {
 }
 
 // RIPE: pitched (or at least voicemailed) but never a real conversation, with
-// a future court date far enough out that the chase is still running. These
-// are alive-but-idle files the far-future court reminders used to mask —
-// they get their own warm queue on the Today view. Not ripe once the court
-// date is inside the pre-court remarketing window (the court reminders own
-// the lead then), once the chase is exhausted, or once money is promised/paid
-// (those have their own billing tracks).
+// a future court date. These are alive-but-idle files the far-future court
+// reminders used to mask — they get their own warm queue on the Today view,
+// sorted by motions deadline (that's what actually expires the pitch). Not
+// ripe once the court date is inside the final pre-court week (the
+// week-before/day-before reminders own the lead then), once the chase is
+// exhausted, or once money is promised/paid (those have their own billing
+// tracks).
 export function isRipe(lead: Lead): boolean {
   if (!isActiveLead(lead) || lead.deletedAt) return false;
   const attempts = lead.contactAttempts ?? [];
@@ -102,7 +107,7 @@ export function isRipe(lead: Lead): boolean {
   if (hasConversation(lead)) return false;
   if (lead.saleStatus && lead.saleStatus !== 'none') return false;
   const days = courtInDays(lead);
-  return days !== null && days > CHASE_COURT_BUFFER_DAYS;
+  return days !== null && days > RIPE_COURT_MIN_DAYS;
 }
 
 // Leads shown on the main notepad board (active intake, not yet decided/handed off).

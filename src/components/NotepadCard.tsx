@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import type { Lead } from '../types';
 import { fmtDate, daysUntilCourt, fmtAppeared, weekdayColor } from '../lib/dates';
 import { isActiveLead, isContactOverdue, isSalePending, STAGE_LABELS } from '../lib/leadFlow';
+import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { useNow } from '../lib/useNow';
 import { Badge } from './ui/Badge';
 
@@ -67,6 +68,11 @@ export function NotepadCard({
   const calls = (lead.contactAttempts ?? []).filter((a) => a.via === 'callrail');
   const lastCallTs = calls.reduce((m, a) => Math.max(m, a.ts), 0);
   const freshCall = now - lastCallTs < 86400000;
+
+  // Motions-deadline countdown — unsold leads only, once the (derived) last
+  // day to file for a continuance is inside 14 days. Red at 5 days or closed.
+  const ddl = isActiveLead(lead) ? motionsDeadlineFor(lead) : null;
+  const showDdl = ddl !== null && ddl.daysLeft <= 14;
 
   // Money on the table: they said yes on a call but payment was never taken.
   // Gold treatment — louder than anything else, because the pitch is already
@@ -185,6 +191,13 @@ export function NotepadCard({
               </Badge>
             )}
             {uncontacted && <Badge tone={ageTone}>uncontacted · {ageLabel}</Badge>}
+            {showDdl && (
+              <Badge tone={ddl.passed || ddl.daysLeft <= 5 ? 'red' : 'amber'}>
+                {ddl.passed
+                  ? 'Motions window closed'
+                  : `Motions ddl ${ddl.daysLeft === 0 ? 'today' : `${ddl.daysLeft}d`}`}
+              </Badge>
+            )}
             {lead.owner && (
               <span className="data text-[10px] text-pad-inkSoft/70">{lead.owner}</span>
             )}

@@ -13,6 +13,7 @@ import { outstandingOf } from '../lib/paymentLedger';
 import { useNow } from '../lib/useNow';
 import { DAY } from '../lib/followups';
 import { courtDatePassed, daysUntilCourt, fmtMoney, fmtShort, paymentPastDue } from '../lib/dates';
+import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { completeFollowUp } from '../lib/actions';
 import { Badge } from '../components/ui/Badge';
 
@@ -31,6 +32,8 @@ interface Task {
   lead: Lead;
   why: string;
   followUpId?: string;
+  // Loud red flag rendered beside the name (motions-window urgency).
+  tag?: string;
 }
 
 function agingLabel(ms: number): string {
@@ -110,21 +113,36 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
       const td = pending.find((f) => f.dueAt >= todayStart && f.dueAt < todayEnd);
 
       // 3. Ripe — pitched/voicemailed but never a real conversation, court
-      //    still far enough out that the chase is running. These alive-but-
-      //    idle files used to hide behind far-future court reminders; they
-      //    outrank the generic overdue noise so the silence stays visible.
+      //    still ahead. These alive-but-idle files used to hide behind
+      //    far-future court reminders; they outrank the generic overdue noise
+      //    so the silence stays visible. Urgency is the MOTIONS DEADLINE, not
+      //    the court date — that's when the continuance pitch expires.
       if (isRipe(l)) {
         const attempts = l.contactAttempts ?? [];
         const lastTouch = attempts.reduce((m, a) => Math.max(m, a.ts), 0);
         const sinceDays = Math.max(0, Math.floor((now - lastTouch) / DAY));
         const courtDays = daysUntilCourt(l);
+        const ddl = motionsDeadlineFor(l);
         const bits = [
           `${attempts.length} touch${attempts.length === 1 ? '' : 'es'}`,
           `last ${sinceDays}d ago`,
           `court ${fmtShort(l.nextCourtDate)} — in ${courtDays}d`,
+          ddl
+            ? `motions ddl ${fmtShort(ddl.date)}${
+                ddl.passed
+                  ? ' — closed'
+                  : ` — ${ddl.daysLeft === 0 ? 'TODAY' : `in ${ddl.daysLeft}d`}`
+              }`
+            : null,
           `Angle: ${chaseAngleForTouch(attempts.length + 1)}`,
-        ];
-        ripe.push({ lead: l, why: bits.join(' · ') });
+        ].filter(Boolean);
+        const tag =
+          ddl && ddl.passed
+            ? 'WINDOW CLOSED — call today'
+            : ddl && ddl.daysLeft <= 7
+              ? 'INSIDE MOTIONS WINDOW'
+              : undefined;
+        ripe.push({ lead: l, why: bits.join(' · '), tag });
         continue;
       }
 
@@ -158,8 +176,13 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         (b.lead.salePromisedAt ?? b.lead.saleStatusAt ?? 0),
     );
     collections.sort((a, b) => outstandingOf(b.lead) - outstandingOf(a.lead));
-    // Soonest court date first — that pitch expires first.
-    ripe.sort((a, b) => (daysUntilCourt(a.lead) ?? Infinity) - (daysUntilCourt(b.lead) ?? Infinity));
+    // Soonest motions deadline first — that's when the pitch actually
+    // expires. A passed window (negative daysLeft) naturally sorts to the
+    // very top; leads whose deadline can't be computed fall back to court
+    // proximity at the bottom.
+    const ddlDays = (l: Lead) =>
+      motionsDeadlineFor(l)?.daysLeft ?? (daysUntilCourt(l) ?? Infinity) + 1000;
+    ripe.sort((a, b) => ddlDays(a.lead) - ddlDays(b.lead));
     uncontacted.sort(
       (a, b) => (a.lead.receivedAt ?? a.lead.createdAt) - (b.lead.receivedAt ?? b.lead.createdAt),
     );
@@ -291,7 +314,7 @@ function RipeSection({
         <div>
           <h2 className="font-hand text-2xl text-orange-300">Ripe — Pitched, No Answer</h2>
           <p className="text-manila/60 text-xs">
-            Voicemails aren't contacts — keep chasing before court gets close
+            Voicemails aren't contacts — keep chasing before the motions window closes
           </p>
         </div>
         <Badge tone="amber">{tasks.length}</Badge>
@@ -346,13 +369,18 @@ function Row({
   task: Task;
   onOpen: (id: string) => void;
 }) {
-  const { lead, why, followUpId } = task;
+  const { lead, why, followUpId, tag } = task;
   const owned = Boolean(lead.owner);
   return (
     <li className="flex items-center justify-between gap-3 rounded-lg bg-manila/95 px-3 py-2">
       <button className="min-w-0 flex-1 text-left" onClick={() => onOpen(lead.id)}>
         <div className="flex items-center gap-2">
           <p className="truncate font-type text-sm font-semibold text-pad-ink">{lead.name}</p>
+          {tag && (
+            <span className="shrink-0 rounded bg-pad-red px-1.5 py-0.5 font-type text-[9px] font-black uppercase tracking-wider text-white">
+              {tag}
+            </span>
+          )}
           {owned && (
             <span className="data shrink-0 rounded bg-pad-ink/10 px-1.5 text-[10px] text-pad-inkSoft">
               {lead.owner}

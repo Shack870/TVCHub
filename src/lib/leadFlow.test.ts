@@ -159,10 +159,13 @@ describe('isRipe (the chase queue)', () => {
     expect(isRipe(ripeLead({ lastConnectedAt: Date.now() }))).toBe(false);
   });
 
-  it('not ripe when uncontacted, exhausted, or court is inside the reminder window', () => {
+  it('not ripe when uncontacted, exhausted, or court is inside the final week', () => {
     expect(isRipe(ripeLead({ contactAttempts: [] }))).toBe(false);
     expect(isRipe(ripeLead({ cadenceExhaustedAt: Date.now() }))).toBe(false);
-    expect(isRipe(ripeLead({ nextCourtDate: iso(14) }))).toBe(false); // reminders own it
+    // Inside the motions window is still ripe (the deadline tags escalate it);
+    // only the last pre-court week belongs to the week/day-before reminders.
+    expect(isRipe(ripeLead({ nextCourtDate: iso(14) }))).toBe(true);
+    expect(isRipe(ripeLead({ nextCourtDate: iso(5) }))).toBe(false); // reminders own it
     expect(isRipe(ripeLead({ nextCourtDate: null }))).toBe(false);
     expect(
       isRipe(

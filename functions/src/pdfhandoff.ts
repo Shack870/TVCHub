@@ -26,7 +26,9 @@ import { createSign } from "node:crypto";
 // JWT-signing (same pattern as emailsync.ts delegatedToken, datastore scope,
 // no sub claim) and talk to the Firestore REST API.
 
-const PDFAPP_SA_KEY = defineSecret("PDFAPP_SA_KEY");
+// Exported so the cadence sweep can reuse the same secret + token plumbing
+// for its read-only motion check (see motionExistsInPdfApp below).
+export const PDFAPP_SA_KEY = defineSecret("PDFAPP_SA_KEY");
 
 const PDF_PROJECT = "ironrockpdf";
 const FS_BASE = `https://firestore.googleapis.com/v1/projects/${PDF_PROJECT}/databases/(default)/documents`;
@@ -48,7 +50,7 @@ const b64url = (s: string | Buffer): string =>
 // OAuth token for the ironrockpdf Firestore: sign a JWT with the SA key and
 // exchange it at Google's token endpoint. Unlike the Gmail sync there is no
 // `sub` claim — we act as the service account itself, not as a user.
-async function datastoreToken(keyJson: string): Promise<string> {
+export async function datastoreToken(keyJson: string): Promise<string> {
   const key = JSON.parse(keyJson) as { client_email: string; private_key: string };
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
@@ -606,6 +608,56 @@ async function recordHandoffFailure(leadId: string, err: unknown): Promise<void>
     updatedAt: now,
   });
   logger.warn("PDF handoff: gave up after max attempts, post-it created", { leadId, attempts });
+}
+
+// ---------- Motion detection (read-only, for the cadence sweep) ----------
+
+// Does the lead's PDF-app case already have a motion on file? Detection is
+// deliberately CONSERVATIVE — we only answer true when the case data clearly
+// shows one, and any doubt (missing case, fetch error, unexpected shape)
+// answers false so the reminder still fires.
+//
+// Where motions live in the PDF app's caseData (see IronRockPDFMaker
+// js/case-store.js and js/motion-tracks.js):
+//   - caseData.generated is a map { templateId: 'YYYY-MM-DD' } stamped by
+//     markGenerated() each time a document is produced. Motion templates all
+//     carry ids starting with "motion" (motionForDiscovery, motionToContinue,
+//     motionInAbsentia, motionInLimine — see js/templates.js).
+//   - caseData.workflow.initialPleadingsFiledAt is the human-confirmed date
+//     the opening packet (entry of appearance + motions) was FILED with the
+//     court — the strongest signal a motion exists.
+export async function motionExistsInPdfApp(
+  token: string,
+  caseId: string,
+): Promise<boolean> {
+  const res = await fetch(`${FS_BASE}/cases/${encodeURIComponent(caseId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    if (res.status !== 404) {
+      logger.warn("PDF app motion check failed — treating as no motion", {
+        caseId,
+        status: res.status,
+      });
+    }
+    return false;
+  }
+  const doc = (await res.json()) as {
+    fields?: { caseData?: { mapValue?: { fields?: Record<string, FsValue> } } };
+  };
+  const caseFields = doc.fields?.caseData?.mapValue?.fields ?? {};
+
+  const mapFields = (v: FsValue | undefined): Record<string, FsValue> =>
+    ((v as { mapValue?: { fields?: Record<string, FsValue> } } | undefined)?.mapValue
+      ?.fields ?? {});
+  const str = (v: FsValue | undefined): string =>
+    String((v as { stringValue?: string } | undefined)?.stringValue ?? "");
+
+  if (str(mapFields(caseFields.workflow).initialPleadingsFiledAt)) return true;
+  const generated = mapFields(caseFields.generated);
+  return Object.entries(generated).some(
+    ([templateId, v]) => templateId.startsWith("motion") && Boolean(str(v)),
+  );
 }
 
 // ---------- Post-handoff court-date sync ----------

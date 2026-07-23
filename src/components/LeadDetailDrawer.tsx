@@ -12,6 +12,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, STAGE_LABELS } from '../lib/leadFlow';
 import { outstandingOf } from '../lib/paymentLedger';
 import { courtDatePassed, fmtDate, fmtMoney } from '../lib/dates';
+import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { updateLead, updateLeadGuarded } from '../lib/db';
 import { notify } from '../store/useToast';
 import {
@@ -678,6 +679,38 @@ function AttachmentsTab({ lead }: { lead: Lead }) {
   );
 }
 
+// The motions-deadline meta line shown under an upcoming court date —
+// derived, never stored (see src/lib/motionsDeadline.ts).
+function MotionsDeadlineLine({ lead }: { lead: Lead }) {
+  const ddl = motionsDeadlineFor(lead);
+  if (!ddl) return null;
+  const tone = ddl.passed
+    ? 'text-pad-red line-through'
+    : ddl.daysLeft <= 5
+      ? 'text-pad-red font-semibold'
+      : ddl.daysLeft <= 10
+        ? 'text-amber-700 font-semibold'
+        : 'text-pad-inkSoft';
+  return (
+    <div className="flex gap-3 border-b border-pad-line/40 py-1">
+      <span className="w-40 shrink-0" />
+      <p className="min-w-0 flex-1 font-type text-[11px] leading-5">
+        <span className={tone}>
+          Last day to file (incl. continuance): {fmtDate(ddl.date)}
+          {ddl.passed
+            ? ' — window closed'
+            : ` — ${ddl.daysLeft === 0 ? 'TODAY' : `${ddl.daysLeft} day${ddl.daysLeft === 1 ? '' : 's'} away`}`}
+        </span>
+        {ddl.rule === 'MO-5biz' && (
+          <span className="ml-2 text-[10px] uppercase tracking-wide text-pad-inkSoft/60">
+            MO 5-business-day rule
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function CourtDatesTab({ lead }: { lead: Lead }) {
   const current = lead.nextCourtDate ?? '';
   return (
@@ -697,6 +730,7 @@ function CourtDatesTab({ lead }: { lead: Lead }) {
           className="min-w-0 flex-1 rounded bg-transparent px-1 font-type text-sm leading-7 text-pad-ink outline-none transition hover:bg-white/40 focus:bg-white/70 focus:ring-1 focus:ring-pad-ink/20"
         />
       </div>
+      <MotionsDeadlineLine lead={lead} />
       <EditRow lead={lead} k="nextCourtTime" label="Time" />
       <EditRow lead={lead} k="nextCourtType" label="Type" />
       <EditRow lead={lead} k="courtName" label="Court" />
@@ -1270,10 +1304,15 @@ function FirstAttemptModal({
     const now = Date.now();
     if (lead.nextCourtDate) {
       const court = new Date(lead.nextCourtDate + 'T00:00:00').getTime();
-      const t20 = atTime(court - 20 * DAY, period);
+      // Real motions deadline (state-aware, weekend/holiday adjusted) instead
+      // of a flat 20 days — the touch lands ON the last day to file.
+      const ddl = motionsDeadlineFor(lead);
       const t7 = atTime(court - 7 * DAY, period);
       const after = atTime(court + DAY, period);
-      if (t20 > now) out.push({ type: 'week_before', dueAt: t20, note: 'Motions deadline — continuance reminder + pitch (20 days out)' });
+      if (ddl && !ddl.passed) {
+        const tDdl = atTime(new Date(ddl.date + 'T00:00:00').getTime(), period);
+        if (tDdl > now) out.push({ type: 'week_before', dueAt: tDdl, note: `Motions deadline ${fmtDate(ddl.date)} — last day to file for a continuance, final pitch` });
+      }
       if (t7 > now) out.push({ type: 'week_before', dueAt: t7, note: 'Week-before-court reminder + pitch' });
       if (after > now) out.push({ type: 'warrant', dueAt: after, note: 'Day-after-court warrant check' });
     }
