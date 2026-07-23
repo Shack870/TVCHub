@@ -1,15 +1,16 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import type { FollowUp, Lead } from '../types';
 import {
-  balanceOf,
   chaseAngleForTouch,
   isActiveLead,
   isFinancingClient,
   isRipe,
   isSalePending,
 } from '../lib/leadFlow';
+import { outstandingOf } from '../lib/paymentLedger';
+import { useNow } from '../lib/useNow';
 import { DAY } from '../lib/followups';
 import { courtDatePassed, daysUntilCourt, fmtMoney, fmtShort, paymentPastDue } from '../lib/dates';
 import { completeFollowUp } from '../lib/actions';
@@ -43,13 +44,15 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
   const leads = useLeads();
   const selectLead = useUI((s) => s.selectLead);
   const openNewLead = useUI((s) => s.openNewLead);
-  const [now] = useState(() => Date.now());
+  // A ticking clock (not mount-time): a tab left open overnight must roll its
+  // day boundaries and aging labels into the new day on its own.
+  const now = useNow();
 
   const todayStart = useMemo(() => {
-    const d = new Date();
+    const d = new Date(now);
     d.setHours(0, 0, 0, 0);
     return d.getTime();
-  }, []);
+  }, [now]);
   const todayEnd = todayStart + DAY;
 
   // Each lead lands in exactly ONE bucket — its single most-urgent action —
@@ -93,9 +96,10 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         courtPassed.push({ lead: l, why: 'Court date has passed — set a new date or mark dismissed' });
         continue;
       }
-      // 2. Money owed and past due (clients / warrant cases).
+      // 2. Money owed and past due (clients / warrant cases) — judged by the
+      //    unified ledger, so a fee Square already collected never flags here.
       if (isFinancingClient(l) && paymentPastDue(l)) {
-        collections.push({ lead: l, why: `Payment past due · ${fmtMoney(balanceOf(l))} balance` });
+        collections.push({ lead: l, why: `Payment past due · ${fmtMoney(outstandingOf(l))} balance` });
         continue;
       }
       // The rest only apply to leads still being worked.
@@ -153,7 +157,7 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         (a.lead.salePromisedAt ?? a.lead.saleStatusAt ?? 0) -
         (b.lead.salePromisedAt ?? b.lead.saleStatusAt ?? 0),
     );
-    collections.sort((a, b) => balanceOf(b.lead) - balanceOf(a.lead));
+    collections.sort((a, b) => outstandingOf(b.lead) - outstandingOf(a.lead));
     // Soonest court date first — that pitch expires first.
     ripe.sort((a, b) => (daysUntilCourt(a.lead) ?? Infinity) - (daysUntilCourt(b.lead) ?? Infinity));
     uncontacted.sort(

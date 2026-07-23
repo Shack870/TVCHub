@@ -5,6 +5,7 @@ import type {
   Lead,
   Stage,
 } from '../types';
+import { isPaidInFull, outstandingOf } from './paymentLedger';
 
 export const STAGE_LABELS: Record<Stage, string> = {
   new: 'Initial Lead',
@@ -203,38 +204,33 @@ export function isClient(lead: Lead): boolean {
   return lead.stage === 'financed' || lead.stage === 'intake_complete';
 }
 
-// Has a fee and owes nothing — the balance is the source of truth, regardless
-// of whether the `isFinanced` flag was ever set.
-export function isPaidInFull(lead: Lead): boolean {
-  return totalFeeOf(lead) > 0 && balanceOf(lead) === 0;
-}
-
-// A lead belongs in the Financing view while it owes money — either a retained
-// client on/owing a balance, or a non-client who's been charged a warrant fee
-// (so that money is actually collectable somewhere). Paid-off = drops out.
-// Leads in the dedicated "financed" stage always show here, even before a
-// payment-plan record has been filled in.
+// A lead belongs on the ACTIVE Financing board while it still owes money —
+// either a retained client owing a balance, or a non-client who's been
+// charged a warrant fee (so that money is actually collectable somewhere).
+// Money math comes from the unified payment ledger (Square + non-duplicate
+// manual entries), so a client whose fee Square already covered NEVER shows
+// here — they land in the Past Financed archive instead.
+// Leads in the dedicated "financed" stage always show while unpaid, even
+// before a payment-plan record has been filled in.
 export function isFinancingClient(lead: Lead): boolean {
+  if (isPaidInFull(lead)) return false;
   if (lead.stage === 'financed') return true;
-  if (balanceOf(lead) <= 0) return false;
+  if (outstandingOf(lead) <= 0) return false;
   return isClient(lead) || Boolean(lead.hasWarrant);
 }
 
-export function balanceOf(lead: Lead): number {
-  if (!lead.financing) return 0;
-  const paid = lead.financing.payments.reduce((s, p) => s + p.amount, 0);
-  const total = lead.financing.totalFee + (lead.financing.warrantFee ?? 0);
-  return Math.max(0, total - paid);
-}
-
-export function paidOf(lead: Lead): number {
-  if (!lead.financing) return 0;
-  return lead.financing.payments.reduce((s, p) => s + p.amount, 0);
-}
-
-export function totalFeeOf(lead: Lead): number {
-  if (!lead.financing) return 0;
-  return lead.financing.totalFee + (lead.financing.warrantFee ?? 0);
+// The Past Financed archive: was on a payment plan (financed stage/flag, a
+// manual financing record, or a warrant-fee plan) and is now fully collected.
+// Clients who paid in full on the spot were never financed and don't belong
+// here.
+export function isPastFinanced(lead: Lead): boolean {
+  if (!isPaidInFull(lead)) return false;
+  if (lead.stage === 'financed' || lead.isFinanced) return true;
+  const fin = lead.financing;
+  if (fin && ((fin.totalFee ?? 0) + (fin.warrantFee ?? 0) > 0 || fin.payments.length > 0)) {
+    return true;
+  }
+  return Boolean(lead.hasWarrant);
 }
 
 // --- Receivables (Square-tracked payment plans) -----------------------------
@@ -254,10 +250,6 @@ export function lastSquarePaymentTs(lead: Lead): number | null {
   return ts > 0 ? ts : null;
 }
 
-export function squareCollectedOf(lead: Lead): number {
-  return lead.squarePaidTotal ?? 0;
-}
-
 // Days since the plan last saw money. When no payment ever landed, count from
 // when the case entered its financed/paid state instead, so a plan that never
 // produced a single payment still ages into the stall flag.
@@ -270,18 +262,8 @@ export function daysSinceLastSquarePayment(lead: Lead): number | null {
 
 export function isPlanStalled(lead: Lead): boolean {
   if (lead.stage !== 'financed') return false;
+  // A fully collected plan can't stall — it's done (Past Financed).
+  if (isPaidInFull(lead)) return false;
   const days = daysSinceLastSquarePayment(lead);
   return days !== null && days > PLAN_STALL_DAYS;
-}
-
-// Edge case the auto-graduation in syncSquare should normally prevent: Square
-// shows the fee covered but the case still sits in 'financed'. Surfaced as a
-// "paid off?" hint suggesting a manual check.
-export function looksPaidOff(lead: Lead): boolean {
-  return (
-    lead.stage === 'financed' &&
-    typeof lead.saleAmount === 'number' &&
-    lead.saleAmount > 0 &&
-    squareCollectedOf(lead) >= lead.saleAmount
-  );
 }

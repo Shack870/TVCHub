@@ -1,5 +1,6 @@
 import { createLead, LeadCheckError, mutateLead, updateLead } from './db';
-import { balanceOf, isActiveLead, makeEmptyLead, stageForOutcome, totalFeeOf } from './leadFlow';
+import { isActiveLead, makeEmptyLead, stageForOutcome } from './leadFlow';
+import { outstandingOf, totalFeeOf } from './paymentLedger';
 import { advanceMonth, needsCourtDateUpdate } from './dates';
 import { computeFollow, DAY, nextTouch } from './followups';
 import { buildPayment, type ChargeRequest } from './payments';
@@ -352,10 +353,11 @@ export async function recordPayment(
           'Court date has passed — set a new date or mark the case dismissed before recording payment.',
         );
       }
-      // Don't accept more than is owed — overpayment would silently vanish
-      // because the balance floors at zero. Only enforce once a fee is set.
-      const owed = balanceOf(fresh);
-      if (totalFeeOf(fresh) > 0 && req.amount > owed + 0.005) {
+      // Don't accept more than is owed on the UNIFIED ledger (Square + real
+      // manual payments) — overpayment would silently vanish because the
+      // balance floors at zero. Only enforce once a fee is known.
+      const owed = outstandingOf(fresh);
+      if (totalFeeOf(fresh) !== null && req.amount > owed + 0.005) {
         throw new LeadCheckError(
           `Payment exceeds the ${owed.toLocaleString('en-US', {
             style: 'currency',

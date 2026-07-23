@@ -4,7 +4,13 @@ import { Badge } from './ui/Badge';
 import { useUI } from '../store/useUI';
 import { useLead } from '../store/useLeads';
 import type { Lead, Payment } from '../types';
-import { balanceOf, isPaidInFull, paidOf, totalFeeOf } from '../lib/leadFlow';
+import {
+  collectedOf,
+  isPaidInFull,
+  ledgerEntries,
+  outstandingOf,
+  totalFeeOf,
+} from '../lib/paymentLedger';
 import { courtDatePassed, fmtDate, fmtMoney, needsCourtDateUpdate, paymentPastDue } from '../lib/dates';
 import {
   markCaseDismissed,
@@ -26,7 +32,8 @@ export function FinancingModal() {
 }
 
 function Body({ lead, onClose }: { lead: Lead; onClose: () => void }) {
-  const balance = balanceOf(lead);
+  const fee = totalFeeOf(lead);
+  const balance = outstandingOf(lead);
   const paid = isPaidInFull(lead);
   const onPlan = Boolean(lead.isFinanced) && !paid;
   const needsCourtUpdate = needsCourtDateUpdate(lead);
@@ -50,11 +57,11 @@ function Body({ lead, onClose }: { lead: Lead; onClose: () => void }) {
       {needsCourtUpdate && <CourtGate lead={lead} />}
 
       <div className="mt-4 grid grid-cols-3 gap-3 font-type">
-        <Stat label="Total Fee" value={fmtMoney(totalFeeOf(lead))} />
-        <Stat label="Paid" value={fmtMoney(paidOf(lead))} tone="green" />
+        <Stat label="Total Fee" value={fee !== null ? fmtMoney(fee) : '—'} />
+        <Stat label="Collected" value={fmtMoney(collectedOf(lead))} tone="green" />
         <Stat
           label="Balance"
-          value={fmtMoney(balance)}
+          value={fee !== null ? fmtMoney(balance) : '—'}
           tone={balance > 0 ? 'red' : 'green'}
         />
       </div>
@@ -208,28 +215,34 @@ function Terms({ lead, paid }: { lead: Lead; paid: boolean }) {
   );
 }
 
+// Unified payment trail: Square-synced charges + manual entries, newest first.
+// A manual entry judged to be the same money as a Square charge is shown but
+// flagged as not counted, so the history explains the totals above it.
 function PaymentList({ lead }: { lead: Lead }) {
-  const payments = lead.financing?.payments ?? [];
+  const entries = [...ledgerEntries(lead)].reverse();
   return (
     <div className="mt-4">
       <p className="field-label mb-2">Payment History</p>
-      {payments.length === 0 ? (
+      {entries.length === 0 ? (
         <p className="font-type text-xs text-pad-inkSoft">No payments yet.</p>
       ) : (
         <ul className="space-y-1 font-type text-sm">
-          {[...payments].reverse().map((p) => (
+          {entries.map((e, i) => (
             <li
-              key={p.id}
-              className="flex items-center justify-between rounded-md bg-white/70 px-3 py-2"
+              key={`${e.source}:${e.ts}:${i}`}
+              className={`flex items-center justify-between rounded-md bg-white/70 px-3 py-2 ${
+                e.counted ? '' : 'opacity-60'
+              }`}
             >
               <span>
-                {fmtMoney(p.amount)}{' '}
+                {fmtMoney(e.amount)}{' '}
                 <span className="text-xs text-pad-inkSoft">
-                  · {p.method}
+                  · {e.source === 'square' ? 'Square' : e.method ?? 'manual'}
+                  {!e.counted && ' · duplicate of a Square charge — not counted'}
                 </span>
               </span>
               <span className="text-xs text-pad-inkSoft">
-                {new Date(p.date).toLocaleDateString()}
+                {new Date(e.ts).toLocaleDateString()}
               </span>
             </li>
           ))}

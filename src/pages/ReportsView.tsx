@@ -2,17 +2,23 @@ import { useMemo, useState } from 'react';
 import { addWeeks, format } from 'date-fns';
 import { useLeads } from '../store/useLeads';
 import { fmtMoney } from '../lib/dates';
+import { useNow } from '../lib/useNow';
 import { buildReport, reportToText, weeklyLeadTrend, weekRangeFor } from '../lib/metrics';
 
 export function ReportsView() {
   const leads = useLeads();
-  const [ref, setRef] = useState(() => new Date());
+  // A ticking clock so "this week" rolls over on its own — a report left open
+  // across a week boundary must not keep serving the stale week. The user can
+  // still pin a specific week via Prev/Next; This Week returns to live.
+  const now = useNow();
+  const [pinnedRef, setPinnedRef] = useState<Date | null>(null);
+  const ref = useMemo(() => pinnedRef ?? new Date(now), [pinnedRef, now]);
   const [copied, setCopied] = useState(false);
 
   const report = useMemo(() => buildReport(leads, ref), [leads, ref]);
   const trend = useMemo(() => weeklyLeadTrend(leads, ref, 8), [leads, ref]);
 
-  const isThisWeek = weekRangeFor(ref).start === weekRangeFor(new Date()).start;
+  const isThisWeek = weekRangeFor(ref).start === weekRangeFor(new Date(now)).start;
 
   const copy = async () => {
     await navigator.clipboard.writeText(reportToText(report));
@@ -31,19 +37,25 @@ export function ReportsView() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button className="btn-ghost text-manila" onClick={() => setRef(addWeeks(ref, -1))}>
+          <button className="btn-ghost text-manila" onClick={() => setPinnedRef(addWeeks(ref, -1))}>
             ‹ Prev
           </button>
           <button
             className="btn-ghost text-manila"
-            onClick={() => setRef(new Date())}
+            onClick={() => setPinnedRef(null)}
             disabled={isThisWeek}
           >
             This Week
           </button>
           <button
             className="btn-ghost text-manila"
-            onClick={() => setRef(addWeeks(ref, 1))}
+            onClick={() => {
+              const next = addWeeks(ref, 1);
+              // Stepping back into the current week un-pins so it stays live.
+              setPinnedRef(
+                weekRangeFor(next).start === weekRangeFor(new Date()).start ? null : next,
+              );
+            }}
             disabled={isThisWeek}
           >
             Next ›
@@ -111,6 +123,9 @@ export function ReportsView() {
             right={{ value: report.financed, label: 'Financed', color: '#e0a52f' }}
           />
           <Mini label="Avg fee" value={fmtMoney(report.avgFee)} />
+          {report.clientsNoFee > 0 && (
+            <Mini label="No fee on file" value={`${report.clientsNoFee} clients`} />
+          )}
           <Mini label="Avg attempts to close" value={report.avgAttemptsToClose.toFixed(1)} />
         </Panel>
 

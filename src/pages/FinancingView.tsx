@@ -4,16 +4,18 @@ import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import type { Lead } from '../types';
 import {
-  balanceOf,
   daysSinceLastSquarePayment,
   isFinancingClient,
+  isPastFinanced,
   isPlanStalled,
-  lastSquarePaymentTs,
-  looksPaidOff,
-  paidOf,
-  squareCollectedOf,
-  totalFeeOf,
+  STAGE_LABELS,
 } from '../lib/leadFlow';
+import {
+  collectedOf,
+  lastPaymentTs,
+  outstandingOf,
+  totalFeeOf,
+} from '../lib/paymentLedger';
 import { fmtDate, fmtMoney, needsCourtDateUpdate, paymentPastDue } from '../lib/dates';
 import { recordPayment } from '../lib/actions';
 import { Badge } from '../components/ui/Badge';
@@ -22,7 +24,10 @@ export function FinancingView() {
   const leads = useLeads();
   const selectLead = useUI((s) => s.selectLead);
   const openFinancing = useUI((s) => s.openFinancing);
+  const [showPast, setShowPast] = useState(false);
 
+  // Active board: unified ledger says money is still owed. A paid-off client
+  // can never appear here — they move to the Past Financed archive.
   const financed = useMemo(
     () =>
       leads
@@ -36,58 +41,102 @@ export function FinancingView() {
     [leads],
   );
 
-  // Receivables HUD over the financed book (Square-tracked payment plans).
+  // Past Financed: fully collected payment plans, newest final payment first.
+  const past = useMemo(
+    () =>
+      leads
+        .filter(isPastFinanced)
+        .sort((a, b) => (lastPaymentTs(b) ?? 0) - (lastPaymentTs(a) ?? 0)),
+    [leads],
+  );
+
+  // Receivables HUD over EVERY client on the active board, all from the
+  // unified ledger. Clients with no fee on file can't contribute to the book
+  // or outstanding — their collected money is shown but called out separately
+  // so collected can never silently exceed the book.
   const hud = useMemo(() => {
     let book = 0;
     let collected = 0;
     let outstanding = 0;
     let stalled = 0;
+    let noFee = 0;
+    let noFeeCollected = 0;
     for (const l of financed) {
-      if (l.stage !== 'financed') continue;
-      book += l.saleAmount ?? 0;
-      collected += squareCollectedOf(l);
-      outstanding += outstandingOf(l);
+      const fee = totalFeeOf(l);
+      collected += collectedOf(l);
+      if (fee === null) {
+        noFee += 1;
+        noFeeCollected += collectedOf(l);
+      } else {
+        book += fee;
+        outstanding += outstandingOf(l);
+      }
       if (isPlanStalled(l)) stalled += 1;
     }
-    return { book, collected, outstanding, stalled };
+    return { book, collected, outstanding, stalled, noFee, noFeeCollected };
   }, [financed]);
 
   return (
     <div>
-      <header className="mb-6">
-        <h1 className="font-hand text-4xl text-white">Financing</h1>
-        <p className="text-manila/70 text-sm">
-          {financed.length} clients on payment plans
-        </p>
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="font-hand text-4xl text-white">Financing</h1>
+          <p className="text-manila/70 text-sm">
+            {showPast
+              ? `${past.length} paid-off plan${past.length === 1 ? '' : 's'} in the archive`
+              : `${financed.length} client${financed.length === 1 ? '' : 's'} on payment plans`}
+          </p>
+        </div>
+        <button
+          className={`btn-ghost text-manila ring-1 ring-white/15 ${showPast ? 'bg-white/10' : ''}`}
+          onClick={() => setShowPast((v) => !v)}
+        >
+          {showPast ? `← Active plans (${financed.length})` : `Past Financed (${past.length})`}
+        </button>
       </header>
 
-      <ReceivablesHud {...hud} />
-
-      {financed.length === 0 ? (
-        <p className="rounded-xl bg-black/20 p-10 text-center font-type text-sm text-manila/50">
-          No financed clients yet.
-        </p>
+      {showPast ? (
+        past.length === 0 ? (
+          <p className="rounded-xl bg-black/20 p-10 text-center font-type text-sm text-manila/50">
+            No paid-off plans yet.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {past.map((l) => (
+              <PastFinanceCard
+                key={l.id}
+                lead={l}
+                onOpenDetail={() => selectLead(l.id)}
+                onManage={() => openFinancing(l.id)}
+              />
+            ))}
+          </div>
+        )
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {financed.map((l) => (
-            <FinanceCard
-              key={l.id}
-              lead={l}
-              onOpenDetail={() => selectLead(l.id)}
-              onManage={() => openFinancing(l.id)}
-            />
-          ))}
-        </div>
+        <>
+          <ReceivablesHud {...hud} />
+
+          {financed.length === 0 ? (
+            <p className="rounded-xl bg-black/20 p-10 text-center font-type text-sm text-manila/50">
+              Nobody owes a dime — every plan is collected.
+              {past.length > 0 ? ' Paid-off plans live under Past Financed.' : ''}
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {financed.map((l) => (
+                <FinanceCard
+                  key={l.id}
+                  lead={l}
+                  onOpenDetail={() => selectLead(l.id)}
+                  onManage={() => openFinancing(l.id)}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
-}
-
-// Outstanding receivable on a plan: what's still owed of the quoted fee. When
-// no fee was ever recorded there's nothing to compute against.
-function outstandingOf(lead: Lead): number {
-  if (typeof lead.saleAmount !== 'number' || lead.saleAmount <= 0) return 0;
-  return Math.max(0, lead.saleAmount - squareCollectedOf(lead));
 }
 
 // Summary HUD in the Money-on-the-Table treatment: the financed book is
@@ -97,11 +146,15 @@ function ReceivablesHud({
   collected,
   outstanding,
   stalled,
+  noFee,
+  noFeeCollected,
 }: {
   book: number;
   collected: number;
   outstanding: number;
   stalled: number;
+  noFee: number;
+  noFeeCollected: number;
 }) {
   return (
     <section className="mb-6 rounded-2xl bg-gradient-to-r from-amber-500/15 via-amber-400/10 to-amber-500/15 p-4 ring-2 ring-amber-400/50">
@@ -128,6 +181,13 @@ function ReceivablesHud({
           className={stalled > 0 ? 'text-pad-red' : 'text-manila/80'}
         />
       </div>
+      {noFee > 0 && (
+        <p className="mt-2 font-type text-xs text-manila/60">
+          {noFee} client{noFee === 1 ? '' : 's'} with no fee on file —{' '}
+          {fmtMoney(noFeeCollected)} collected from them isn't counted in the book or
+          outstanding.
+        </p>
+      )}
     </section>
   );
 }
@@ -149,12 +209,12 @@ function HudStat({
   );
 }
 
-// Payment progress off the Square trail: collected vs the quoted fee, with the
-// newest reconciled charge as the "last payment" stamp.
+// Payment progress off the unified ledger: collected vs the fee, with the
+// newest counted payment (Square or manual) as the "last payment" stamp.
 function PaymentProgress({ lead }: { lead: Lead }) {
-  const collected = squareCollectedOf(lead);
-  const fee = typeof lead.saleAmount === 'number' && lead.saleAmount > 0 ? lead.saleAmount : null;
-  const lastTs = lastSquarePaymentTs(lead);
+  const collected = collectedOf(lead);
+  const fee = totalFeeOf(lead);
+  const lastTs = lastPaymentTs(lead);
   const pct = fee ? Math.min(100, (collected / fee) * 100) : null;
 
   const lastLabel = lastTs
@@ -165,7 +225,7 @@ function PaymentProgress({ lead }: { lead: Lead }) {
     <div className="mt-3">
       <div className="flex items-baseline justify-between font-type text-xs text-pad-inkSoft">
         <span className="font-semibold text-pad-ink">
-          {fee
+          {fee !== null
             ? `${fmtMoney(collected)} of ${fmtMoney(fee)}`
             : `${fmtMoney(collected)} collected (no fee on file)`}
         </span>
@@ -192,12 +252,12 @@ function FinanceCard({
   onOpenDetail: () => void;
   onManage: () => void;
 }) {
-  const balance = balanceOf(lead);
+  const fee = totalFeeOf(lead);
+  const balance = outstandingOf(lead);
   const pastDue = paymentPastDue(lead);
   const courtFlag = needsCourtDateUpdate(lead);
   const stalled = isPlanStalled(lead);
   const stallDays = daysSinceLastSquarePayment(lead);
-  const paidOffHint = looksPaidOff(lead);
   const monthly = lead.financing?.monthlyAmount ?? 0;
   const [custom, setCustom] = useState('');
   const [busy, setBusy] = useState(false);
@@ -243,24 +303,15 @@ function FinanceCard({
           )}
           {courtFlag && <Badge tone="red">Court date passed</Badge>}
           {pastDue && <Badge tone="red">Past due</Badge>}
-          {paidOffHint && <Badge tone="green">Paid off?</Badge>}
         </div>
       </div>
 
       <PaymentProgress lead={lead} />
 
-      {paidOffHint && (
-        <p className="mt-2 rounded-md bg-emerald-600/10 px-2 py-1 font-type text-xs text-emerald-800">
-          Square shows {fmtMoney(squareCollectedOf(lead))} collected against a{' '}
-          {fmtMoney(lead.saleAmount ?? 0)} fee — this plan looks paid off but still sits in
-          Financed. Double-check and move it along.
-        </p>
-      )}
-
       <div className="mt-3 grid grid-cols-4 gap-2 font-type text-sm">
-        <Mini label="Fee" value={fmtMoney(totalFeeOf(lead))} />
-        <Mini label="Paid" value={fmtMoney(paidOf(lead))} />
-        <Mini label="Balance" value={fmtMoney(balance)} strong={balance > 0} />
+        <Mini label="Fee" value={fee !== null ? fmtMoney(fee) : 'none on file'} />
+        <Mini label="Collected" value={fmtMoney(collectedOf(lead))} />
+        <Mini label="Balance" value={fee !== null ? fmtMoney(balance) : '—'} strong={balance > 0} />
         <Mini label="Monthly" value={monthly ? fmtMoney(monthly) : '—'} />
       </div>
       <p className="mt-2 font-type text-xs text-pad-inkSoft">
@@ -310,14 +361,70 @@ function FinanceCard({
           </button>
         </div>
       ) : (
-        <div className="mt-3 border-t border-black/10 pt-3 font-type text-xs font-semibold text-emerald-700">
-          Paid in full ✓
-          <button className="ml-2 font-normal text-pad-inkSoft underline" onClick={onManage}>
-            History
+        <div className="mt-3 border-t border-black/10 pt-3 font-type text-xs text-pad-inkSoft">
+          {/* No fee on file: nothing computable to collect against. */}
+          Set the fee to track this plan's balance.
+          <button className="ml-2 font-normal underline" onClick={onManage}>
+            Set fee / history
           </button>
         </div>
       )}
       {msg && <p className="mt-2 font-type text-xs text-pad-inkSoft">{msg}</p>}
+    </div>
+  );
+}
+
+// Archived treatment for a settled plan: same card bones, muted, leading with
+// what was collected and when the final payment landed.
+function PastFinanceCard({
+  lead,
+  onOpenDetail,
+  onManage,
+}: {
+  lead: Lead;
+  onOpenDetail: () => void;
+  onManage: () => void;
+}) {
+  const fee = totalFeeOf(lead);
+  const collected = collectedOf(lead);
+  const finalTs = lastPaymentTs(lead);
+
+  return (
+    <div className="legal-pad relative rounded-lg p-4 pl-14 opacity-80 shadow-card ring-1 ring-black/10 saturate-50">
+      <div className="pointer-events-none absolute right-4 top-4 -rotate-12">
+        <span className="stamp text-base text-emerald-700">Paid in Full</span>
+      </div>
+      <div className="flex items-start justify-between">
+        <button className="min-w-0 text-left" onClick={onOpenDetail}>
+          <h3 className="font-hand text-2xl ink hover:underline">{lead.name}</h3>
+          <p className="font-type text-xs text-pad-inkSoft">
+            {STAGE_LABELS[lead.stage]} · TVC #{lead.tvcCaseNumber || '—'}
+          </p>
+        </button>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2 font-type text-sm">
+        <Mini label="Collected" value={fmtMoney(collected)} />
+        <Mini label="Fee" value={fee !== null ? fmtMoney(fee) : 'none on file'} />
+        <Mini
+          label="Final payment"
+          value={finalTs ? new Date(finalTs).toLocaleDateString() : '—'}
+        />
+      </div>
+      {finalTs && (
+        <p className="mt-2 font-type text-xs text-pad-inkSoft">
+          Settled {formatDistanceToNow(finalTs, { addSuffix: true })}
+          {fee !== null && collected > fee
+            ? ` · ${fmtMoney(collected - fee)} over the recorded fee`
+            : ''}
+        </p>
+      )}
+
+      <div className="mt-3 border-t border-black/10 pt-3">
+        <button className="btn-ghost px-2 py-1 text-xs text-pad-ink" onClick={onManage}>
+          Payment history ▸
+        </button>
+      </div>
     </div>
   );
 }

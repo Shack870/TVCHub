@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import type { Lead } from '../types';
-import { balanceOf, isPaidInFull, totalFeeOf } from '../lib/leadFlow';
+import { isPaidInFull, outstandingOf, totalFeeOf } from '../lib/paymentLedger';
 import { fmtDate, fmtMoney, paymentPastDue } from '../lib/dates';
 import { Badge } from '../components/ui/Badge';
 import { SendToPdfAppButton } from '../components/SendToPdfAppButton';
@@ -81,7 +81,8 @@ function Row({
   onOpen: () => void;
   onFinancing: () => void;
 }) {
-  const balance = balanceOf(lead);
+  const fee = totalFeeOf(lead);
+  const balance = outstandingOf(lead);
   const pastDue = paymentPastDue(lead);
   return (
     <tr className="border-t border-black/5 text-pad-ink">
@@ -107,9 +108,13 @@ function Row({
       </td>
       <td className="px-4 py-3">{fmtDate(lead.nextCourtDate)}</td>
       <td className="px-4 py-3">
-        <div>{fmtMoney(totalFeeOf(lead))}</div>
+        <div>{fee !== null ? fmtMoney(fee) : '— no fee on file'}</div>
         <div className={`text-xs ${pastDue ? 'font-bold text-pad-red' : 'text-pad-inkSoft'}`}>
-          {balance > 0 ? `${fmtMoney(balance)} left${pastDue ? ' · PAST DUE' : ''}` : 'Paid in full'}
+          {balance > 0
+            ? `${fmtMoney(balance)} left${pastDue ? ' · PAST DUE' : ''}`
+            : isPaidInFull(lead)
+              ? 'Paid in full'
+              : '—'}
         </div>
       </td>
       <td className="px-4 py-3">

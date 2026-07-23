@@ -6,7 +6,7 @@ import {
   parseISO,
 } from 'date-fns';
 import type { Lead } from '../types';
-import { balanceOf } from './leadFlow';
+import { outstandingOf } from './paymentLedger';
 
 export function fmtDate(iso?: string | null): string {
   if (!iso) return '—';
@@ -134,10 +134,11 @@ export function advanceMonth(iso: string): string {
   return isValid(d) ? format(addMonths(d, 1), 'yyyy-MM-dd') : iso;
 }
 
-// Is a financing payment past due? Only meaningful while a balance is actually
-// owed — a paid-in-full client with a stale due date is NOT past due.
+// Is a financing payment past due? Only meaningful while the unified ledger
+// says money is actually owed — a client whose fee Square already collected
+// (or who's paid in full) with a stale due date is NOT past due.
 export function paymentPastDue(lead: Lead): boolean {
-  if (balanceOf(lead) <= 0) return false;
+  if (outstandingOf(lead) <= 0) return false;
   const due = lead.financing?.nextPaymentDue;
   if (!due) return false;
   const d = parseISO(due);

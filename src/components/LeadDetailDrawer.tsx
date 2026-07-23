@@ -9,7 +9,8 @@ import { useLead } from '../store/useLeads';
 import { useAuth } from '../context/AuthContext';
 import type { ContactOutcome, Lead, Ticket } from '../types';
 import { formatDistanceToNow } from 'date-fns';
-import { balanceOf, isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, STAGE_LABELS } from '../lib/leadFlow';
+import { isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, STAGE_LABELS } from '../lib/leadFlow';
+import { outstandingOf } from '../lib/paymentLedger';
 import { courtDatePassed, fmtDate, fmtMoney } from '../lib/dates';
 import { updateLead, updateLeadGuarded } from '../lib/db';
 import { notify } from '../store/useToast';
@@ -106,7 +107,7 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
   const completeWarnings: string[] = [];
   if (lead.conflictCheck.status !== 'clear') completeWarnings.push('conflict check not cleared');
   if (!lead.retainerSignedConfirmed) completeWarnings.push('retainer not confirmed signed');
-  if (balanceOf(lead) > 0) completeWarnings.push(`${fmtMoney(balanceOf(lead))} balance still owed`);
+  if (outstandingOf(lead) > 0) completeWarnings.push(`${fmtMoney(outstandingOf(lead))} balance still owed`);
   // Honor a deep-linked tab. It can be a top tab (e.g. 'contact' when opening a
   // card from All Active) or a sub tab (e.g. 'checks' from the Retained list).
   const [topTab, setTopTab] = useState<TopTab>(

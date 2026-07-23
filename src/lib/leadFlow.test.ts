@@ -1,19 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
-  balanceOf,
   chaseAngleForTouch,
   isActiveLead,
   isClient,
   isFinancingClient,
   isOnBoard,
-  isPaidInFull,
+  isPastFinanced,
+  isPlanStalled,
   isRipe,
   isTerminal,
   makeEmptyLead,
-  paidOf,
   stageForOutcome,
-  totalFeeOf,
 } from './leadFlow';
+import { isPaidInFull } from './paymentLedger';
 import { makeLead } from './testUtils';
 
 describe('stageForOutcome', () => {
@@ -56,7 +55,7 @@ describe('stage predicates', () => {
   });
 });
 
-describe('financing math', () => {
+describe('financing board membership (unified ledger)', () => {
   const lead = makeLead({
     stage: 'financed',
     financing: {
@@ -69,20 +68,7 @@ describe('financing math', () => {
     },
   });
 
-  it('sums fee, paid, and balance including warrant fee', () => {
-    expect(totalFeeOf(lead)).toBe(1500);
-    expect(paidOf(lead)).toBe(1000);
-    expect(balanceOf(lead)).toBe(500);
-  });
-
-  it('treats no-financing leads as zero', () => {
-    const bare = makeLead();
-    expect(totalFeeOf(bare)).toBe(0);
-    expect(balanceOf(bare)).toBe(0);
-    expect(isPaidInFull(bare)).toBe(false);
-  });
-
-  it('isPaidInFull only when there is a fee and zero balance', () => {
+  it('isPaidInFull via manual payments covering the fee', () => {
     const paid = makeLead({
       stage: 'intake_complete',
       financing: {
@@ -92,10 +78,12 @@ describe('financing math', () => {
     });
     expect(isPaidInFull(paid)).toBe(true);
     expect(isFinancingClient(paid)).toBe(false); // paid off => drops out
+    expect(isPastFinanced(paid)).toBe(true); // manual plan, settled
   });
 
   it('isFinancingClient when a client still owes', () => {
     expect(isFinancingClient(lead)).toBe(true);
+    expect(isPastFinanced(lead)).toBe(false);
   });
 
   it('isFinancingClient for a non-client with a warrant fee owed', () => {
@@ -105,6 +93,32 @@ describe('financing math', () => {
       financing: { totalFee: 0, warrantFee: 500, payments: [] },
     });
     expect(isFinancingClient(warrant)).toBe(true);
+  });
+
+  it('a financed-stage lead whose fee Square covered leaves the active board for Past Financed', () => {
+    const squarePaid = makeLead({
+      stage: 'financed',
+      saleAmount: 700,
+      squarePaidTotal: 700,
+      saleStatus: 'paid_partial',
+      isFinanced: true,
+    });
+    expect(isPaidInFull(squarePaid)).toBe(true);
+    expect(isFinancingClient(squarePaid)).toBe(false); // never on the active board
+    expect(isPastFinanced(squarePaid)).toBe(true);
+    expect(isPlanStalled(squarePaid)).toBe(false); // settled plans can't stall
+  });
+
+  it('a paid-on-the-spot client was never financed and skips Past Financed', () => {
+    const cashClient = makeLead({
+      stage: 'intake_complete',
+      saleAmount: 1125,
+      squarePaidTotal: 1125,
+      saleStatus: 'paid_full',
+    });
+    expect(isPaidInFull(cashClient)).toBe(true);
+    expect(isPastFinanced(cashClient)).toBe(false);
+    expect(isFinancingClient(cashClient)).toBe(false);
   });
 });
 

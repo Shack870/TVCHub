@@ -8,7 +8,7 @@ import {
 } from '../lib/leadAlerts';
 import { useLeads } from '../store/useLeads';
 import { notify } from '../store/useToast';
-import { balanceOf, totalFeeOf } from '../lib/leadFlow';
+import { collectedOf, outstandingOf, totalFeeOf } from '../lib/paymentLedger';
 import type { Lead } from '../types';
 
 export function SettingsView() {
@@ -116,18 +116,17 @@ function leadsToCsv(leads: Lead[]): string {
   const header = [
     'name', 'stage', 'tvcCaseNumber', 'phone', 'email', 'charge', 'courtName',
     'county', 'state', 'nextCourtDate', 'owner', 'source', 'receivedAt',
-    'retainedAt', 'totalFee', 'paid', 'balance', 'contactAttempts',
+    'retainedAt', 'totalFee', 'collected', 'outstanding', 'contactAttempts',
     'lastContactAt', 'openFollowUps', 'lostReason', 'createdAt',
   ];
   const rows = leads.map((l) => {
     const attempts = l.contactAttempts ?? [];
     const last = attempts.length ? attempts[attempts.length - 1].ts : null;
-    const paid = (l.financing?.payments ?? []).reduce((s, p) => s + p.amount, 0);
     const iso = (ms?: number | null) => (ms ? new Date(ms).toISOString() : '');
     return [
       l.name, l.stage, l.tvcCaseNumber, l.phone, l.email, l.charge, l.courtName,
       l.county, l.state, l.nextCourtDate, l.owner, l.source, iso(l.receivedAt),
-      iso(l.retainedAt), totalFeeOf(l), paid, balanceOf(l), attempts.length,
+      iso(l.retainedAt), totalFeeOf(l) ?? '', collectedOf(l), outstandingOf(l), attempts.length,
       iso(last), (l.followUps ?? []).filter((f) => !f.done).length,
       l.lostReason, iso(l.createdAt),
     ]

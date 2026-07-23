@@ -7,7 +7,14 @@ import {
   subDays,
 } from 'date-fns';
 import type { Lead } from '../types';
-import { balanceOf, isClient, paidOf, totalFeeOf } from './leadFlow';
+import { isClient } from './leadFlow';
+import {
+  collectedInRange,
+  collectedOf,
+  isPaidInFull,
+  outstandingOf,
+  totalFeeOf,
+} from './paymentLedger';
 import { paymentPastDue } from './dates';
 
 // The firm's sales week runs Monday 00:00 → the following Monday 00:00.
@@ -52,11 +59,11 @@ export interface SalesReport {
 
   // This week's flow (Mon → end of week)
   leadsIn: number;
-  callsLogged: number; // contact attempts logged this week (all leads)
+  callsLogged: number; // actual calls this week (manual logs + CallRail; not Square/email)
   retainedThisWeek: number; // leads whose retainedAt falls in this week
   declinedThisWeek: number; // decline outcomes logged this week
   lostThisWeek: number; // leads written off this week
-  revenueCollected: number; // payments dated this week
+  revenueCollected: number; // unified-ledger money landed this week (Square by payment ts)
   attorneyRequests: number; // wants-attorney attempts this week
 
   // Cohort: of leads received THIS week, how the funnel looks so far
@@ -75,10 +82,11 @@ export interface SalesReport {
   closeRate: number; // clients / total leads, %
   decisionCloseRate: number; // clients / decided (clients + declined + lost), %
   declineRate: number; // declined / total, %
-  financed: number;
-  paidInFull: number;
+  financed: number; // clients still owing on the unified ledger
+  paidInFull: number; // fully collected (or saleStatus paid_full)
   financeRate: number; // financed / clients, %
-  avgFee: number;
+  avgFee: number; // over clients with a known fee only
+  clientsNoFee: number; // clients with no fee on file (excluded from avgFee)
   avgAttemptsToClose: number;
   avgSpeedToContactHours: number | null; // received -> first attempt
   pastDueAccounts: number; // clients with a payment past due
@@ -105,14 +113,15 @@ export function buildReport(leads: Lead[], ref: Date = new Date()): SalesReport 
   for (const l of leads) {
     for (const a of l.contactAttempts ?? []) {
       if (inRange(a.ts, range)) {
-        callsLogged += 1;
+        // Only actual calls: manual logs (no via) and CallRail-verified calls.
+        // Square charges and synced emails also live in contactAttempts but
+        // are not phone work.
+        if (!a.via || a.via === 'callrail') callsLogged += 1;
         if (a.outcome === 'declined') declinedThisWeek += 1;
         if (a.outcome === 'wants_attorney') attorneyRequests += 1;
       }
     }
-    for (const p of l.financing?.payments ?? []) {
-      if (inRange(p.date, range)) revenueCollected += p.amount;
-    }
+    revenueCollected += collectedInRange(l, range.start, range.end);
   }
   const retainedThisWeek = leads.filter((l) => inRange(l.retainedAt, range)).length;
   const lostThisWeek = leads.filter((l) => inRange(l.lostAt, range)).length;
@@ -146,12 +155,20 @@ export function buildReport(leads: Lead[], ref: Date = new Date()): SalesReport 
   const lost = leads.filter((l) => l.stage === 'lost').length;
   const declined = leads.filter((l) => !isClient(l) && l.stage !== 'lost' && hasDeclined(l)).length;
   const decided = clients + declined + lost;
-  // Bucket by the live balance, not the flag: a client who paid off their plan
-  // counts as paid in full, not financed.
-  const paidInFull = clientList.filter((l) => balanceOf(l) === 0).length;
+  // Bucket by the unified ledger, not the flag: a client whose fee is fully
+  // collected (Square + real manual payments) counts as paid in full; only
+  // clients still owing count as financed.
+  const paidInFull = clientList.filter(isPaidInFull).length;
   const financed = clients - paidInFull;
 
-  const avgFee = clients > 0 ? clientList.reduce((s, l) => s + totalFeeOf(l), 0) / clients : 0;
+  // Average fee over clients whose fee is actually known — a missing fee is
+  // unknown, not $0 (averaging zeros is how the $64 avg fee happened).
+  const knownFees = clientList
+    .map(totalFeeOf)
+    .filter((f): f is number => f !== null);
+  const avgFee =
+    knownFees.length > 0 ? knownFees.reduce((s, f) => s + f, 0) / knownFees.length : 0;
+  const clientsNoFee = clients - knownFees.length;
   const attemptsToClose = clientList.map((l) => (l.contactAttempts ?? []).length).filter((n) => n > 0);
   const avgAttemptsToClose =
     attemptsToClose.length > 0
@@ -171,8 +188,8 @@ export function buildReport(leads: Lead[], ref: Date = new Date()): SalesReport 
     speeds.length > 0 ? speeds.reduce((s, n) => s + n, 0) / speeds.length / 3600000 : null;
 
   const pastDueAccounts = leads.filter((l) => isClient(l) && paymentPastDue(l)).length;
-  const outstanding = clientList.reduce((s, l) => s + balanceOf(l), 0);
-  const collectedAllTime = leads.reduce((s, l) => s + paidOf(l), 0);
+  const outstanding = clientList.reduce((s, l) => s + outstandingOf(l), 0);
+  const collectedAllTime = leads.reduce((s, l) => s + collectedOf(l), 0);
 
   // --- Live pipeline snapshot ---
   const byStage = (fn: (l: Lead) => boolean) => leads.filter(fn).length;
@@ -213,6 +230,7 @@ export function buildReport(leads: Lead[], ref: Date = new Date()): SalesReport 
     paidInFull,
     financeRate: pct(financed, clients),
     avgFee,
+    clientsNoFee,
     avgAttemptsToClose,
     avgSpeedToContactHours,
     pastDueAccounts,
@@ -266,7 +284,7 @@ export function reportToText(r: SalesReport): string {
     `• Contacted rate: ${r.contactedRate}%`,
     `• Avg speed to first contact: ${r.avgSpeedToContactHours == null ? '—' : r.avgSpeedToContactHours.toFixed(1) + ' hrs'}`,
     `• Finance rate: ${r.financeRate}% financed (${r.financed} financed / ${r.paidInFull} paid in full)`,
-    `• Avg fee: ${money(r.avgFee)}`,
+    `• Avg fee: ${money(r.avgFee)}${r.clientsNoFee > 0 ? ` (${r.clientsNoFee} client${r.clientsNoFee === 1 ? '' : 's'} with no fee on file)` : ''}`,
     `• Avg attempts to close: ${r.avgAttemptsToClose.toFixed(1)}`,
     ``,
     `BOOK`,

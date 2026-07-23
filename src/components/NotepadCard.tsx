@@ -1,8 +1,8 @@
-import { useState } from 'react';
 import { motion } from 'framer-motion';
 import type { Lead } from '../types';
 import { fmtDate, daysUntilCourt, fmtAppeared, weekdayColor } from '../lib/dates';
 import { isActiveLead, isContactOverdue, isSalePending, STAGE_LABELS } from '../lib/leadFlow';
+import { useNow } from '../lib/useNow';
 import { Badge } from './ui/Badge';
 
 function PhoneGlyph({ className }: { className?: string }) {
@@ -37,7 +37,9 @@ export function NotepadCard({
   onOpen?: () => void;
   big?: boolean;
 }) {
-  const [now] = useState(() => Date.now());
+  // Ticking clock, not mount-time: age badges and the fresh-call glow must
+  // keep aging while the board sits open.
+  const now = useNow();
 
   const uncontacted = isActiveLead(lead) && (lead.contactAttempts?.length ?? 0) === 0;
   const ageHrs = (now - (lead.receivedAt ?? lead.createdAt)) / 3600000;
