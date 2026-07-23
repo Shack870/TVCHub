@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import type { Lead } from '../types';
 import { fmtDate, daysUntilCourt, fmtAppeared, weekdayColor } from '../lib/dates';
-import { isActiveLead, isContactOverdue, isSalePending, STAGE_LABELS } from '../lib/leadFlow';
+import { isActiveLead, isContactOverdue, isSalePending, showsMotionsDeadline, STAGE_LABELS } from '../lib/leadFlow';
 import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { useNow } from '../lib/useNow';
 import { Badge } from './ui/Badge';
@@ -69,9 +69,10 @@ export function NotepadCard({
   const lastCallTs = calls.reduce((m, a) => Math.max(m, a.ts), 0);
   const freshCall = now - lastCallTs < 86400000;
 
-  // Motions-deadline countdown — unsold leads only, once the (derived) last
-  // day to file for a continuance is inside 14 days. Red at 5 days or closed.
-  const ddl = isActiveLead(lead) ? motionsDeadlineFor(lead) : null;
+  // Motions-deadline countdown — active UNSOLD leads only (no paid_* — the
+  // deadline is a sales tool), once the (derived) last day to file for a
+  // continuance is inside 14 days. Red at 5 days or closed.
+  const ddl = showsMotionsDeadline(lead) ? motionsDeadlineFor(lead) : null;
   const showDdl = ddl !== null && ddl.daysLeft <= 14;
 
   // Money on the table: they said yes on a call but payment was never taken.

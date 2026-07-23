@@ -18,6 +18,7 @@ import { fmtShort } from '../lib/dates';
 import { useUI } from '../store/useUI';
 import type { FollowUpType, Lead } from '../types';
 import { completeFollowUp } from '../lib/actions';
+import { showsMotionsDeadline } from '../lib/leadFlow';
 import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { Modal } from '../components/ui/Modal';
@@ -69,7 +70,9 @@ function leadEvents(lead: Lead): CalEvent[] {
       out.push({ leadId: lead.id, leadName: lead.name, date: d, kind: 'court' });
       // The derived motions-filing deadline rides along as its own event —
       // visually distinct from the court appearance (blue ink, not red).
-      const ddl = motionsDeadlineFor(lead);
+      // Unsold leads only: the deadline is a sales tool, so retained (incl.
+      // financed / paid_*) files keep their court event but get no ddl event.
+      const ddl = showsMotionsDeadline(lead) ? motionsDeadlineFor(lead) : null;
       if (ddl) {
         out.push({
           leadId: lead.id,
@@ -397,8 +400,8 @@ function DayCardModal({
       }
       // Derived motions-filing deadlines land on their own line of the day
       // sheet — kept OUT of the docket count so they never read as a court
-      // appearance.
-      if (activeCase) {
+      // appearance. Unsold leads only (same scoping as the grid events).
+      if (activeCase && showsMotionsDeadline(lead)) {
         const ddl = motionsDeadlineFor(lead);
         if (ddl?.date === key) motions.push({ lead, rule: ddl.rule });
       }

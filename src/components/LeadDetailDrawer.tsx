@@ -9,7 +9,7 @@ import { useLead } from '../store/useLeads';
 import { useAuth } from '../context/AuthContext';
 import type { ContactOutcome, Lead, Ticket } from '../types';
 import { formatDistanceToNow } from 'date-fns';
-import { isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, STAGE_LABELS } from '../lib/leadFlow';
+import { isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, showsMotionsDeadline, STAGE_LABELS } from '../lib/leadFlow';
 import { outstandingOf } from '../lib/paymentLedger';
 import { courtDatePassed, fmtDate, fmtMoney } from '../lib/dates';
 import { motionsDeadlineFor } from '../lib/motionsDeadline';
@@ -680,9 +680,11 @@ function AttachmentsTab({ lead }: { lead: Lead }) {
 }
 
 // The motions-deadline meta line shown under an upcoming court date —
-// derived, never stored (see src/lib/motionsDeadline.ts).
+// derived, never stored (see src/lib/motionsDeadline.ts). Sales tool for
+// unsold leads only: retained/lost files show the court date with no
+// deadline line (see showsMotionsDeadline).
 function MotionsDeadlineLine({ lead }: { lead: Lead }) {
-  const ddl = motionsDeadlineFor(lead);
+  const ddl = showsMotionsDeadline(lead) ? motionsDeadlineFor(lead) : null;
   if (!ddl) return null;
   const tone = ddl.passed
     ? 'text-pad-red line-through'

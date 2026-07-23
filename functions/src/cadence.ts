@@ -3,7 +3,6 @@ import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
 import { ensureFollowUp } from "./callrail.js";
 import { motionsDeadlineFor, type MotionsDeadline } from "./motionsDeadline.js";
-import { PDFAPP_SA_KEY, datastoreToken, motionExistsInPdfApp } from "./pdfhandoff.js";
 
 // Daily contact-cadence sweep (7:00 AM Central, before the calling day).
 //
@@ -22,8 +21,11 @@ import { PDFAPP_SA_KEY, datastoreToken, motionExistsInPdfApp } from "./pdfhandof
 //   2. DECIDE — connected but undecided (they're "thinking"): a follow-up
 //      every 3 days so a pitch never goes quiet.
 //   3. REMARKET — any active unsold lead with a future court date gets free
-//      court-reminder touches at 7 days and 1 day out; if the court date
-//      passes with no decision, a post-it asks for the write-off call.
+//      court-reminder touches at 7 days and 1 day out, plus a free
+//      motions-deadline heads-up call ~6 days before the last day to file
+//      (the continuance pitch: they don't want to travel — we can file the
+//      Motion to Continue). If the court date passes with no decision, a
+//      post-it asks for the write-off call.
 //   0. BILLING (hottest track, runs before the others) — a lead who said YES
 //      on a call but didn't pay (saleStatus promised_unpaid) gets a same-day
 //      collect-payment follow-up, then one every 2 days. After 3 collection
@@ -37,12 +39,12 @@ import { PDFAPP_SA_KEY, datastoreToken, motionExistsInPdfApp } from "./pdfhandof
 // by planStallFlaggedAt, which syncSquare clears when money arrives — so a
 // plan that stays silent re-flags once per 35-day window).
 //
-// A MOTIONS pass watches the RETAINED side: sold cases (financed /
-// intake_complete stage, or saleStatus paid_*) with an upcoming court date
-// get an Action Item post-it at deadline−7 and a red-alert post-it on
-// deadline day — unless the IronRockPDF app already shows a motion on file
-// for the lead's pdfAppCaseId. Guarded per court date by motionsRemind7At /
-// motionsRemindDayAt + motionsRemindFor, so a continuance re-arms both.
+// NOTE ON SCOPE: TVCHub is sales/intake only. The motions deadline exists
+// here as a SALES tool for UNSOLD leads (the free deadline heads-up is a
+// remarketing touch, and the continuance pitch is the close). Once a client
+// retains and is handed to the PDF app, TVCHub is agnostic about their legal
+// deadlines — no operational filing reminders flow upstream from PDF-app
+// concerns.
 
 const DAY = 86400_000;
 
@@ -255,9 +257,6 @@ export const cadenceSweep = onSchedule(
     schedule: "0 7 * * *",
     timeZone: "America/Chicago",
     timeoutSeconds: 300,
-    // Read-only access to the IronRockPDF app, to check whether a motion is
-    // already on file before nagging about a deadline.
-    secrets: [PDFAPP_SA_KEY],
   },
   async () => {
     const db = getFirestore();
@@ -494,6 +493,24 @@ export const cadenceSweep = onSchedule(
               note: "Free court reminder — court is tomorrow (remarketing touch)",
             },
           ];
+          // Free motions-deadline heads-up, ~6 days before the last day to
+          // file — the SALES touch this deadline exists for: free value plus
+          // the continuance pitch. Unsold leads only (paid_* clients are the
+          // PDF app's concern); promised_unpaid still counts — they haven't
+          // completed. Same type+proximity dedupe as the court reminders, so
+          // it fires once per deadline and a continuance re-arms it.
+          const sold = typeof d.saleStatus === "string" && d.saleStatus.startsWith("paid");
+          if (!sold && ddl && !ddl.passed) {
+            const ddlMs = new Date(`${ddl.date}T09:00:00-05:00`).getTime();
+            targets.push({
+              type: "week_before",
+              dueAt: ddlMs - 6 * DAY,
+              note:
+                `Free deadline heads-up call — last day to file (incl. Motion to ` +
+                `Continue) is ${fmtDeadlineHuman(ddl.date)}. They don't want to ` +
+                `travel: pitch us handling the continuance.`,
+            });
+          }
           for (const t of targets) {
             if (t.dueAt < now - DAY) continue; // window already passed
             // Skip if a reminder of this type already exists near the target,
@@ -596,146 +613,6 @@ export const cadenceSweep = onSchedule(
       stalledPlans++;
     }
 
-    // --- MOTIONS: retained-side filing-deadline reminders --------------------
-    // Sold cases (financed / intake_complete stage, or an active-stage lead
-    // whose saleStatus is paid_*) with an upcoming court date. At deadline−7
-    // an Action Item post-it goes on the desk; on deadline day a red-alert
-    // billing_escalation-style post-it — unless the IronRockPDF app already
-    // shows a motion on file for the lead. Each fires once per court date
-    // (motionsRemindFor keys the guards; a continuance re-arms them).
-    let motions7 = 0;
-    let motionsDay = 0;
-    let motionsHadMotion = 0; // reminders suppressed — motion already on file
-    // FLOOD GUARD (the court-passed flood lesson): on the first run, deadlines
-    // that passed more than 3 days ago only stamp their guards — no post-its.
-    let motionsFloodSkipped = 0;
-
-    // One PDF-app token per sweep, minted lazily. If the secret/token is
-    // unavailable, motion checks are disabled and we remind unconditionally
-    // (the conservative fallback).
-    let pdfToken: string | null | undefined;
-    const motionOnFile = async (caseId: unknown): Promise<boolean> => {
-      if (typeof caseId !== "string" || !caseId) return false; // undetectable → remind
-      if (pdfToken === undefined) {
-        try {
-          pdfToken = await datastoreToken(PDFAPP_SA_KEY.value());
-        } catch (e) {
-          logger.warn("PDF app token unavailable — motion checks disabled this sweep", {
-            error: String(e),
-          });
-          pdfToken = null;
-        }
-      }
-      if (pdfToken === null) return false;
-      try {
-        return await motionExistsInPdfApp(pdfToken, caseId);
-      } catch (e) {
-        logger.warn("PDF app motion check errored — treating as no motion", {
-          caseId,
-          error: String(e),
-        });
-        return false;
-      }
-    };
-
-    const soldSnap = await db
-      .collection("leads")
-      .where("stage", "in", ["financed", "intake_complete"])
-      .get();
-    const soldDocs = new Map(soldSnap.docs.map((doc) => [doc.id, doc]));
-    for (const doc of snap.docs) {
-      const s = doc.data().saleStatus;
-      if (typeof s === "string" && s.startsWith("paid")) soldDocs.set(doc.id, doc);
-    }
-
-    for (const doc of soldDocs.values()) {
-      const d = doc.data();
-      if (d.deletedAt || d.caseDismissed) continue;
-      const courtDate =
-        typeof d.nextCourtDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.nextCourtDate)
-          ? (d.nextCourtDate as string)
-          : null;
-      if (!courtDate) continue;
-      const ddl = motionsDeadlineFor(
-        { nextCourtDate: courtDate, state: d.state as string | undefined },
-        todayISO,
-      );
-      if (!ddl) continue; // court date already passed
-
-      // Guards are keyed to the court date — a continuance re-arms both.
-      let armed = (d.motionsRemindFor as string | undefined) === courtDate;
-      const fired7 = armed && Boolean(d.motionsRemind7At);
-      const firedDay = armed && Boolean(d.motionsRemindDayAt);
-      const lead = {
-        id: doc.id,
-        name: (d.name as string) || "(unnamed)",
-        phone: (d.phone as string) || null,
-        email: (d.email as string) || null,
-      };
-      const ruleLabel =
-        ddl.rule === "MO-5biz" ? "MO 5-business-day rule" : "AR 20-calendar-day rule";
-      const deadlineEventAt = new Date(`${ddl.date}T09:00:00-05:00`).getTime();
-
-      // deadline−7: heads-up Action Item (skipped entirely when the sweep
-      // first sees the lead after the deadline — the day branch owns that).
-      if (!fired7 && ddl.daysLeft <= 7) {
-        await doc.ref.update({
-          motionsRemind7At: now,
-          motionsRemindFor: courtDate,
-          ...(armed ? {} : { motionsRemindDayAt: null }),
-          updatedAt: now,
-        });
-        armed = true;
-        if (ddl.daysLeft > 0) {
-          if (await motionOnFile(d.pdfAppCaseId)) {
-            motionsHadMotion++;
-          } else {
-            await postIt(
-              db,
-              lead,
-              `Motions deadline in 7 days — ${lead.name}`,
-              `${lead.name}'s last day to file motions is ${fmtDeadlineHuman(ddl.date)} ` +
-                `(${ddl.daysLeft} day${ddl.daysLeft === 1 ? "" : "s"} away — court ` +
-                `${fmtDeadlineHuman(courtDate)}, ${ruleLabel}). No motion is on file in the ` +
-                `PDF app yet — get the motions drafted and filed this week.`,
-              { eventAt: now },
-            );
-            motions7++;
-          }
-        }
-      }
-
-      // Deadline day (or a just-missed sweep day): red alert if still unfiled.
-      if (!firedDay && ddl.daysLeft <= 0) {
-        await doc.ref.update({
-          motionsRemindDayAt: now,
-          motionsRemindFor: courtDate,
-          ...(armed ? {} : { motionsRemind7At: null }),
-          updatedAt: now,
-        });
-        if (ddl.daysLeft < -3) {
-          // Historical backlog — guard stamped silently, no desk flood.
-          motionsFloodSkipped++;
-        } else if (await motionOnFile(d.pdfAppCaseId)) {
-          motionsHadMotion++;
-        } else {
-          await postIt(
-            db,
-            lead,
-            ddl.daysLeft === 0
-              ? `MOTIONS DEADLINE TODAY — ${lead.name}`
-              : `MOTIONS DEADLINE PASSED — ${lead.name}`,
-            `${lead.name}'s last day to file motions ${
-              ddl.daysLeft === 0 ? "is TODAY" : `was ${fmtDeadlineHuman(ddl.date)}`
-            } (court ${fmtDeadlineHuman(courtDate)}, ${ruleLabel}) and no motion is on file ` +
-              `in the PDF app. File today or the client appears without one.`,
-            { kind: "billing_escalation", eventAt: deadlineEventAt },
-          );
-          motionsDay++;
-        }
-      }
-    }
-
     logger.info("Cadence sweep complete", {
       activeLeads: snap.size,
       billingFollowUps: billing,
@@ -744,10 +621,6 @@ export const cadenceSweep = onSchedule(
       courtReminders: reminders,
       decisionPostIts: flagged,
       stalledPlanPostIts: stalledPlans,
-      motions7DayPostIts: motions7,
-      motionsDeadlineDayPostIts: motionsDay,
-      motionsSuppressedMotionOnFile: motionsHadMotion,
-      motionsFloodGuardSkipped: motionsFloodSkipped,
     });
   },
 );

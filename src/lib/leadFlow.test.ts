@@ -10,6 +10,7 @@ import {
   isRipe,
   isTerminal,
   makeEmptyLead,
+  showsMotionsDeadline,
   stageForOutcome,
 } from './leadFlow';
 import { isPaidInFull } from './paymentLedger';
@@ -52,6 +53,32 @@ describe('stage predicates', () => {
     expect(isClient(makeLead({ stage: 'financed' }))).toBe(true);
     expect(isClient(makeLead({ stage: 'intake_complete' }))).toBe(true);
     expect(isClient(makeLead({ stage: 'lost' }))).toBe(false);
+  });
+});
+
+describe('showsMotionsDeadline (deadline surfaces are a sales tool)', () => {
+  it('shows for active unsold leads, incl. promised_unpaid', () => {
+    expect(showsMotionsDeadline(makeLead({ stage: 'pitched' }))).toBe(true);
+    expect(showsMotionsDeadline(makeLead({ stage: 'nurture', saleStatus: 'none' }))).toBe(true);
+    // A verbal yes with no money collected hasn't completed — still a sale in flight.
+    expect(
+      showsMotionsDeadline(makeLead({ stage: 'pitched', saleStatus: 'promised_unpaid' })),
+    ).toBe(true);
+  });
+
+  it('hides for retained, paid, lost, or archived leads', () => {
+    expect(showsMotionsDeadline(makeLead({ stage: 'intake_complete' }))).toBe(false);
+    expect(showsMotionsDeadline(makeLead({ stage: 'financed' }))).toBe(false);
+    expect(showsMotionsDeadline(makeLead({ stage: 'lost' }))).toBe(false);
+    expect(showsMotionsDeadline(makeLead({ stage: 'pitched', saleStatus: 'paid_full' }))).toBe(
+      false,
+    );
+    expect(
+      showsMotionsDeadline(makeLead({ stage: 'pitched', saleStatus: 'paid_partial' })),
+    ).toBe(false);
+    expect(showsMotionsDeadline(makeLead({ stage: 'pitched', deletedAt: Date.now() }))).toBe(
+      false,
+    );
   });
 });
 

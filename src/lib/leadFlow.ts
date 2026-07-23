@@ -155,6 +155,17 @@ export function isActiveLead(lead: Lead): boolean {
   return !['financed', 'intake_complete', 'lost'].includes(lead.stage);
 }
 
+// Motions-deadline surfaces (drawer line, board chip, calendar events, Ripe
+// tags) are a SALES tool for UNSOLD leads only: the free deadline heads-up is
+// a remarketing touch and the continuance pitch is the close. Once a client
+// pays (paid_*) or the file reaches a terminal stage, TVCHub goes agnostic
+// about their legal deadlines — those live in the PDF app. promised_unpaid
+// still shows: they said yes but haven't completed.
+export function showsMotionsDeadline(lead: Lead): boolean {
+  if (!isActiveLead(lead) || lead.deletedAt) return false;
+  return !(lead.saleStatus ?? '').startsWith('paid');
+}
+
 // Reached a final disposition (won or lost).
 export function isTerminal(lead: Lead): boolean {
   return ['financed', 'intake_complete', 'lost'].includes(lead.stage);
