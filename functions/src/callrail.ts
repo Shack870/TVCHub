@@ -11,12 +11,18 @@ import { randomUUID } from "node:crypto";
 //   - outbound or answered-inbound  -> appends an auto-logged contact attempt
 //   - missed/voicemail inbound      -> drops a "missed call" post-it on the desk
 //
-// SAFETY: stage moves stay human decisions with ONE deliberate exception
-// (approved by the user): when a transcript shows payment actually collected,
-// the sync moves the lead off the working board — paid_full -> intake_complete,
-// paid_partial -> financed — and stamps an audit note on the lead and the
-// attempt. It never touches human-set retained/financed/intake_complete/lost
-// stages, and promised_unpaid (yes, but no money yet) never auto-moves.
+// SAFETY: sales-critical stages move only by human action or verified payment.
+// Two deliberate, user-approved automatic moves exist:
+//   1. Payment confirmed on a transcript moves the lead off the working board
+//      — paid_full -> intake_complete, paid_partial -> financed — with an
+//      audit note on the lead and the attempt. promised_unpaid (yes, but no
+//      money yet) never auto-moves, and if both rules fire on the same call
+//      the sale move wins.
+//   2. First contact activity promotes new -> callback: logging an auto
+//      attempt (call or synced email) on a lead still in 'new' means it is no
+//      longer untouched. ONLY that promotion — no other stage is ever touched,
+//      and nothing is ever downgraded.
+// Human-set retained/financed/intake_complete/lost stages are never overridden.
 
 const CALLRAIL_API_KEY = defineSecret("CALLRAIL_API_KEY");
 const OPENAI_API_KEY_CR = defineSecret("OPENAI_API_KEY");
@@ -535,10 +541,22 @@ export const syncCallRail = onSchedule(
         if (move) {
           Object.assign(patch, move.patch);
           movedTo = move.patch.stage as string;
+        } else if (d.stage === "new") {
+          // First contact activity: the lead is no longer untouched, so it
+          // leaves Initial Leads for the pipeline. Only new -> callback — a
+          // sale-driven move above wins, and every other stage stays human.
+          patch.stage = "callback";
+          movedTo = "callback";
         }
         tx.update(ref, patch);
       });
-      if (movedTo) {
+      if (movedTo === "callback") {
+        logger.info("Promoted new lead to callback on first contact activity", {
+          leadId: lead.id,
+          name: lead.name,
+          callId: call.id,
+        });
+      } else if (movedTo) {
         logger.info("Auto-moved lead stage on confirmed payment", {
           leadId: lead.id,
           name: lead.name,

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
-import { isInitialLead, isPipelineLead } from '../lib/leadFlow';
+import { isInitialLead, isPipelineLead, nextPendingFollowUp } from '../lib/leadFlow';
 import { isBillingNote, isSystemNote } from '../lib/notes';
 import { sendToInitialLeads } from '../lib/actions';
 import { archiveMessage } from '../lib/db';
 import { daysUntilCourt } from '../lib/dates';
+import { useNow } from '../lib/useNow';
 import type { Lead } from '../types';
 import { NotepadCard } from '../components/NotepadCard';
 import { MessagePostIt } from '../components/MessagePostIt';
@@ -15,7 +16,7 @@ import { Badge } from '../components/ui/Badge';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 type View = 'grid' | 'focus';
-type Sort = 'court' | 'newest';
+type Sort = 'court' | 'newest' | 'nextTouch';
 type Scope = 'initial' | 'pipeline';
 
 // Handled notes are paged so an old backlog never swamps the desk.
@@ -25,6 +26,12 @@ const HANDLED_PAGE_SIZE = 9;
 function courtRank(l: Lead): number {
   const d = daysUntilCourt(l);
   return d === null ? Number.POSITIVE_INFINITY : d;
+}
+
+// Next-touch urgency: soonest pending follow-up first (overdue naturally
+// bubbles to the top); leads with nothing scheduled sink last.
+function nextTouchRank(l: Lead): number {
+  return nextPendingFollowUp(l)?.dueAt ?? Number.POSITIVE_INFINITY;
 }
 
 // When the lead last demanded attention — a TVC re-send bumps it back to the
@@ -93,7 +100,12 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const openNewLead = useUI((s) => s.openNewLead);
   const [scope, setScope] = useState<Scope>('initial');
   const [view, setView] = useState<View>('grid');
+  // Each tab has its own default order: fresh arrivals first on Initial
+  // Leads, soonest scheduled touch first on the Follow-Up Pipeline.
   const [sort, setSort] = useState<Sort>('newest');
+  // Ticking clock so day-relative ranks (court proximity, overdue touches)
+  // re-rank when the day rolls over instead of freezing at mount time.
+  const now = useNow();
   const [query, setQuery] = useState('');
   const [sel, setSel] = useState(0);
   const [dir, setDir] = useState(1);
@@ -166,10 +178,12 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   const board = useMemo(() => {
     const inScope = scope === 'initial' ? isInitialLead : isPipelineLead;
     const list = leads.filter(inScope).filter((l) => matches(l, query));
-    return sort === 'court'
-      ? [...list].sort((a, b) => courtRank(a) - courtRank(b))
-      : [...list].sort((a, b) => appearedAt(b) - appearedAt(a));
-  }, [leads, query, sort, scope]);
+    if (sort === 'court') return [...list].sort((a, b) => courtRank(a) - courtRank(b));
+    if (sort === 'nextTouch') return [...list].sort((a, b) => nextTouchRank(a) - nextTouchRank(b));
+    return [...list].sort((a, b) => appearedAt(b) - appearedAt(a));
+    // `now` re-runs the day-relative ranks (courtRank) across day boundaries.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leads, query, sort, scope, now]);
 
   const safeSel = Math.min(sel, Math.max(0, board.length - 1));
   const current = board[safeSel];
@@ -242,7 +256,11 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
         : board.length === 1
           ? ' lead in the pipeline'
           : ' leads in the pipeline'}
-      {query ? ' match' : scope === 'initial' ? ' · uncontacted' : ' · contacted, not retained'}
+      {query
+        ? ' match'
+        : scope === 'initial'
+          ? ' · no contact attempt yet'
+          : ' · contacted (by you or a synced call/email), not retained'}
     </p>
   );
   const scopeToggle = (
@@ -255,6 +273,7 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
       onChange={(v) => {
         setScope(v as Scope);
         setSel(0);
+        setSort(v === 'pipeline' ? 'nextTouch' : 'newest');
       }}
     />
   );
@@ -279,6 +298,8 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
       </div>
       <Toggle
         options={[
+          // The pipeline's namesake order: what's the next scheduled touch?
+          ...(scope === 'pipeline' ? [{ id: 'nextTouch', label: 'By Next Touch' }] : []),
           { id: 'court', label: 'By Court' },
           { id: 'newest', label: 'Newest' },
         ]}
@@ -570,8 +591,9 @@ function EmptyDesk({ onNew, scope }: { onNew: () => void; scope: Scope }) {
           <>
             <p className="font-hand text-3xl ink">No new initial leads.</p>
             <p className="mt-2 font-type text-sm text-pad-inkSoft">
-              Uncontacted TVC referrals land here automatically. Once you log a
-              first attempt, they move to the Follow-Up Pipeline.
+              Genuinely untouched TVC referrals land here automatically. The
+              first contact attempt — logged by you or auto-logged by a synced
+              call or email — moves them to the Follow-Up Pipeline.
             </p>
             <button className="btn-primary mt-5" onClick={onNew}>
               + New Lead
@@ -581,8 +603,9 @@ function EmptyDesk({ onNew, scope }: { onNew: () => void; scope: Scope }) {
           <>
             <p className="font-hand text-3xl ink">Pipeline is empty.</p>
             <p className="mt-2 font-type text-sm text-pad-inkSoft">
-              Leads appear here after you log a first contact attempt — these are
-              contacted clients you haven't retained yet.
+              Leads land here after the first contact attempt — yours or a
+              synced call/email — and stay until they're retained or written
+              off.
             </p>
           </>
         )}

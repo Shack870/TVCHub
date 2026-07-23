@@ -1313,7 +1313,7 @@ function FirstAttemptModal({
       const after = atTime(court + DAY, period);
       if (ddl && !ddl.passed) {
         const tDdl = atTime(new Date(ddl.date + 'T00:00:00').getTime(), period);
-        if (tDdl > now) out.push({ type: 'week_before', dueAt: tDdl, note: `Motions deadline ${fmtDate(ddl.date)} — last day to file for a continuance, final pitch` });
+        if (tDdl > now) out.push({ type: 'motions', dueAt: tDdl, note: `Motions deadline ${fmtDate(ddl.date)} — last day to file for a continuance, final pitch` });
       }
       if (t7 > now) out.push({ type: 'week_before', dueAt: t7, note: 'Week-before-court reminder + pitch' });
       if (after > now) out.push({ type: 'warrant', dueAt: after, note: 'Day-after-court warrant check' });
@@ -1591,6 +1591,7 @@ const FOLLOWUP_LABELS: Record<FollowUpType, string> = {
   chase: 'Chase call',
   week_before: 'Week-before-court call',
   day_before: 'Day-before-court call',
+  motions: 'Motions-deadline heads-up call',
   warrant: 'Warrant follow-up',
   attorney: 'Attorney call',
   billing: 'Collect promised payment',

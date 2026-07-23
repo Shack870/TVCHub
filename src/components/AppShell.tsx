@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import { type ReactNode } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useLeads, useLeadsStatus } from '../store/useLeads';
-import { isActiveLead, isClient, isFinancingClient, isOnBoard } from '../lib/leadFlow';
+import { isActiveLead, isClient, isFinancingClient, isOnBoard, isPipelineLead } from '../lib/leadFlow';
 import { paymentPastDue } from '../lib/dates';
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -24,7 +24,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       return n + uncontacted + due + stalled;
     }, 0),
     board: leads.filter(isOnBoard).length,
-    command: leads.filter((l) => l.stage === 'callback' || l.stage === 'nurture' || l.stage === 'attorney_call').length,
+    // Mirrors CommandCenter's classify(): every pipeline stage — callback,
+    // pitched (Awaiting Decision), attorney_call, nurture — has a queue.
+    command: leads.filter(isPipelineLead).length,
     financing: leads.filter(isFinancingClient).length,
     completed: leads.filter((l) => l.stage === 'intake_complete').length,
     noSale: leads.filter((l) => l.stage === 'lost').length,

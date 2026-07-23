@@ -1,7 +1,15 @@
 import { motion } from 'framer-motion';
-import type { Lead } from '../types';
+import type { FollowUp, Lead } from '../types';
 import { fmtDate, daysUntilCourt, fmtAppeared, weekdayColor } from '../lib/dates';
-import { isActiveLead, isContactOverdue, isSalePending, showsMotionsDeadline, STAGE_LABELS } from '../lib/leadFlow';
+import {
+  chicagoDayStart,
+  isActiveLead,
+  isContactOverdue,
+  isSalePending,
+  nextPendingFollowUp,
+  showsMotionsDeadline,
+  STAGE_LABELS,
+} from '../lib/leadFlow';
 import { motionsDeadlineFor } from '../lib/motionsDeadline';
 import { useNow } from '../lib/useNow';
 import { Badge } from './ui/Badge';
@@ -13,6 +21,18 @@ function PhoneGlyph({ className }: { className?: string }) {
     </svg>
   );
 }
+
+const FOLLOWUP_LABELS: Record<FollowUp['type'], string> = {
+  callback: 'Call back',
+  nurture: 'Nurture check-in',
+  chase: 'Chase call',
+  week_before: 'Week-before-court call',
+  day_before: 'Day-before-court call',
+  motions: 'Motions-deadline heads-up call',
+  warrant: 'Warrant follow-up',
+  attorney: 'Attorney call',
+  billing: 'Collect promised payment',
+};
 
 function stageTone(stage: Lead['stage']) {
   switch (stage) {
@@ -50,7 +70,12 @@ export function NotepadCard({
   const days = daysUntilCourt(lead);
   const courtTone =
     days !== null && days < 0 ? 'red' : days !== null && days <= 7 ? 'amber' : 'neutral';
-  const overdue = isContactOverdue(lead);
+  const overdue = isContactOverdue(lead, now);
+
+  // The lead's next scheduled touch — what the Follow-Up Pipeline is actually
+  // waiting on. Red once its day has passed on the desk clock (Chicago).
+  const nextTouch = isActiveLead(lead) ? nextPendingFollowUp(lead) : null;
+  const nextTouchOverdue = nextTouch !== null && nextTouch.dueAt < chicagoDayStart(now);
 
   const appearedAt = lead.receivedAt ?? lead.createdAt;
   const appeared = fmtAppeared(appearedAt);
@@ -234,8 +259,23 @@ export function NotepadCard({
           </div>
         </div>
 
+        {nextTouch && (
+          <p
+            className={`mt-2 data text-[11px] ${
+              nextTouchOverdue ? 'font-bold text-pad-red' : 'text-pad-inkSoft/80'
+            }`}
+          >
+            Next: {FOLLOWUP_LABELS[nextTouch.type]} ·{' '}
+            {new Date(nextTouch.dueAt).toLocaleDateString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              timeZone: 'America/Chicago',
+            })}
+            {nextTouchOverdue ? ' — overdue' : ''}
+          </p>
+        )}
         {lead.contactAttempts?.length > 0 && (
-          <p className="mt-2 data text-[11px] text-pad-inkSoft/70">
+          <p className={`data text-[11px] text-pad-inkSoft/70 ${nextTouch ? 'mt-0.5' : 'mt-2'}`}>
             {lead.contactAttempts.length} attempt
             {lead.contactAttempts.length > 1 ? 's' : ''} logged
           </p>

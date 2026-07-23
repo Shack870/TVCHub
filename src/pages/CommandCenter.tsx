@@ -176,7 +176,9 @@ function Queue({
       {leads.length === 0 ? (
         <p className="py-5 text-center font-type text-xs text-manila/40">Empty</p>
       ) : (
-        <ul className="space-y-2">
+        // Scroll-capped: post-backfill the Callbacks queue carries dozens of
+        // leads, and an unbounded list would stretch the whole grid row.
+        <ul className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
           {leads.map((l) => (
             <Row key={l.id} lead={l} queue={def.key} by={by} onOpen={() => onOpen(l.id)} />
           ))}

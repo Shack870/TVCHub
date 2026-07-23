@@ -33,6 +33,7 @@ export type FollowUpType =
   | 'chase' // cadence-engine chase touch: pitched/voicemailed but never a conversation
   | 'week_before'
   | 'day_before'
+  | 'motions' // free motions-deadline heads-up call (~6 days before the last day to file)
   | 'warrant'
   | 'attorney'
   | 'billing'; // collect a payment that was promised on a call

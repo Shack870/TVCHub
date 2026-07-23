@@ -39,6 +39,7 @@ const FOLLOWUP_LABEL: Record<FollowUpType, string> = {
   chase: 'Chase call',
   week_before: 'Week before court',
   day_before: 'Day before court',
+  motions: 'Motions-deadline heads-up',
   warrant: 'Warrant',
   attorney: 'Attorney call',
   billing: 'Collect payment',

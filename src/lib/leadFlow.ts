@@ -120,16 +120,53 @@ export function isInitialLead(lead: Lead): boolean {
   return lead.stage === 'new';
 }
 
+// --- Desk day boundary (America/Chicago) -------------------------------------
+// All "did today's contact happen" math is pinned to the firm's clock, not the
+// browser's — a laptop opened from another timezone must agree with the desk.
+const CHICAGO_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Chicago',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+const CHICAGO_HOUR_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Chicago',
+  hour: '2-digit',
+  hourCycle: 'h23',
+});
+
+// Epoch ms of midnight in Chicago for the day containing `now`. Chicago is
+// UTC-5 (CDT) or UTC-6 (CST); DST flips at 2am so midnight always exists —
+// exactly one candidate formats back to hour 0 of the same Chicago day.
+export function chicagoDayStart(now = Date.now()): number {
+  const iso = CHICAGO_DAY_FMT.format(new Date(now));
+  for (const off of ['-05:00', '-06:00']) {
+    const t = new Date(`${iso}T00:00:00${off}`).getTime();
+    if (CHICAGO_DAY_FMT.format(new Date(t)) === iso && CHICAGO_HOUR_FMT.format(new Date(t)) === '00') {
+      return t;
+    }
+  }
+  return new Date(`${iso}T00:00:00-06:00`).getTime();
+}
+
+// The lead's next scheduled touch: soonest not-done follow-up, or null when
+// nothing is on the calendar.
+export function nextPendingFollowUp(lead: Lead): FollowUp | null {
+  return (
+    (lead.followUps ?? [])
+      .filter((f) => !f.done)
+      .reduce<FollowUp | null>((min, f) => (min === null || f.dueAt < min.dueAt ? f : min), null)
+  );
+}
+
 // Oversight: a contact that should have happened didn't. Two cases:
 //   1. First-contact SLA — an uncontacted, still-active lead that arrived on a
 //      prior day (you should reach every lead the day it comes in).
 //   2. Lapsed reminder — a scheduled follow-up's day passed with no contact
 //      logged on/after it.
 // Either way, the only thing that clears it is logging a new contact attempt.
-export function isContactOverdue(lead: Lead): boolean {
-  const startToday = new Date();
-  startToday.setHours(0, 0, 0, 0);
-  const cutoff = startToday.getTime();
+export function isContactOverdue(lead: Lead, now = Date.now()): boolean {
+  const cutoff = chicagoDayStart(now);
   const attempts = lead.contactAttempts ?? [];
 
   // 1. Never contacted and it's been sitting since before today.

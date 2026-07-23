@@ -14,8 +14,11 @@ import { createSign } from "node:crypto";
 //                                      spoke) and stamps lastConnectedAt, so
 //                                      the cadence nudges instead of chasing
 //
-// Mirrors the CallRail sync's safety rules: never changes a lead's sales
-// stage, and marker docs (emailTouches/{gmailMessageId}) make re-runs
+// Mirrors the CallRail sync's safety rules: sales-critical stages move only
+// by human action or verified payment, with one deliberate exception — first
+// contact activity promotes new -> callback (an email touch on an untouched
+// lead moves it into the pipeline; no other stage is ever changed and nothing
+// is downgraded). Marker docs (emailTouches/{gmailMessageId}) make re-runs
 // harmless. Requires the SA client ID to be authorized for scope
 // gmail.readonly in the Workspace Admin Console (domain-wide delegation).
 
@@ -183,6 +186,9 @@ export const syncEmail = onSchedule(
             updatedAt: Date.now(),
           };
           if (isReply && ts > ((d.lastConnectedAt as number) ?? 0)) patch.lastConnectedAt = ts;
+          // First contact activity promotes new -> callback (the lead is no
+          // longer untouched). Only that move — every other stage stays human.
+          if (d.stage === "new") patch.stage = "callback";
           tx.update(ref, patch);
         });
         await marker.set({

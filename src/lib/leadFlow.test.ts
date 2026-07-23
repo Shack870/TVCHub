@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   chaseAngleForTouch,
+  chicagoDayStart,
   isActiveLead,
   isClient,
+  isContactOverdue,
   isFinancingClient,
   isOnBoard,
   isPastFinanced,
@@ -10,6 +12,7 @@ import {
   isRipe,
   isTerminal,
   makeEmptyLead,
+  nextPendingFollowUp,
   showsMotionsDeadline,
   stageForOutcome,
 } from './leadFlow';
@@ -217,6 +220,80 @@ describe('isRipe (the chase queue)', () => {
     expect(chaseAngleForTouch(3)).toMatch(/price/);
     expect(chaseAngleForTouch(4)).toMatch(/entry of appearance/);
     expect(chaseAngleForTouch(7)).toMatch(/entry of appearance/);
+  });
+});
+
+describe('chicagoDayStart (the desk day boundary)', () => {
+  const chicago = (ts: number) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Chicago',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(new Date(ts));
+
+  it('returns midnight in Chicago for the day containing now', () => {
+    // Summer (CDT, UTC-5) and winter (CST, UTC-6) instants.
+    for (const iso of ['2026-07-23T20:15:00Z', '2026-01-15T03:15:00Z']) {
+      const now = new Date(iso).getTime();
+      const start = chicagoDayStart(now);
+      const day = chicago(now).slice(0, 10);
+      expect(chicago(start)).toBe(`${day}, 00:00`);
+      expect(start).toBeLessThanOrEqual(now);
+      expect(now - start).toBeLessThan(86400_000 + 3600_000);
+    }
+  });
+
+  it('late-evening UTC still belongs to the same Chicago day', () => {
+    // 2026-07-24T03:00Z is 10pm Jul 23 in Chicago — the desk day is Jul 23.
+    const now = new Date('2026-07-24T03:00:00Z').getTime();
+    expect(chicago(chicagoDayStart(now))).toBe('2026-07-23, 00:00');
+  });
+});
+
+describe('nextPendingFollowUp', () => {
+  const fu = (id: string, dueAt: number, done = false) => ({
+    id,
+    type: 'callback' as const,
+    dueAt,
+    done,
+  });
+
+  it('picks the soonest not-done follow-up', () => {
+    const lead = makeLead({ followUps: [fu('later', 500), fu('done', 10, true), fu('soon', 100)] });
+    expect(nextPendingFollowUp(lead)?.id).toBe('soon');
+  });
+
+  it('null when everything is done or nothing is scheduled', () => {
+    expect(nextPendingFollowUp(makeLead())).toBeNull();
+    expect(nextPendingFollowUp(makeLead({ followUps: [fu('done', 10, true)] }))).toBeNull();
+  });
+});
+
+describe('isContactOverdue (pinned to the Chicago desk day)', () => {
+  const DAY = 86400_000;
+  const now = Date.now();
+  const cutoff = chicagoDayStart(now);
+
+  it('uncontacted lead from a prior desk day is overdue; from today is not', () => {
+    expect(isContactOverdue(makeLead({ receivedAt: cutoff - DAY }), now)).toBe(true);
+    expect(isContactOverdue(makeLead({ receivedAt: cutoff + 1 }), now)).toBe(false);
+  });
+
+  it('lapsed reminder flags until a contact lands on/after it', () => {
+    const lapsed = makeLead({
+      contactAttempts: [{ ts: cutoff - 5 * DAY, outcome: 'voicemail' }],
+      followUps: [{ id: 'f', type: 'callback', dueAt: cutoff - 2 * DAY, done: false }],
+    });
+    expect(isContactOverdue(lapsed, now)).toBe(true);
+    const answered = makeLead({
+      ...lapsed,
+      contactAttempts: [...lapsed.contactAttempts, { ts: cutoff - DAY, outcome: 'no_answer' as const }],
+    });
+    expect(isContactOverdue(answered, now)).toBe(false);
   });
 });
 

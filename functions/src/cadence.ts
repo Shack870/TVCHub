@@ -440,10 +440,11 @@ export const cadenceSweep = onSchedule(
               courtMs !== null && (ddl === null || chicagoDayISO(dueAt) > ddl.date);
             // Idempotent: any open non-court-reminder follow-up (a pending
             // chase, a manual callback, a billing touch) means the next touch
-            // is already scheduled. Far-future court reminders deliberately
-            // do NOT count — they were masking three-week silences.
+            // is already scheduled. Far-future court reminders and the
+            // motions-deadline heads-up deliberately do NOT count — they were
+            // masking three-week silences.
             const hasOpenTouch = openFollowUps.some(
-              (f) => !["week_before", "day_before", "warrant"].includes(f.type ?? ""),
+              (f) => !["week_before", "day_before", "motions", "warrant"].includes(f.type ?? ""),
             );
             if (!pastMotionsDeadline && !hasOpenTouch) {
               const added = await ensureFollowUp(db, lead.id, {
@@ -497,13 +498,14 @@ export const cadenceSweep = onSchedule(
           // file — the SALES touch this deadline exists for: free value plus
           // the continuance pitch. Unsold leads only (paid_* clients are the
           // PDF app's concern); promised_unpaid still counts — they haven't
-          // completed. Same type+proximity dedupe as the court reminders, so
-          // it fires once per deadline and a continuance re-arms it.
+          // completed. Its own 'motions' type + the proximity dedupe means it
+          // fires once per deadline, a continuance re-arms it, and it can
+          // coexist with a court week_before reminder landing nearby.
           const sold = typeof d.saleStatus === "string" && d.saleStatus.startsWith("paid");
           if (!sold && ddl && !ddl.passed) {
             const ddlMs = new Date(`${ddl.date}T09:00:00-05:00`).getTime();
             targets.push({
-              type: "week_before",
+              type: "motions",
               dueAt: ddlMs - 6 * DAY,
               note:
                 `Free deadline heads-up call — last day to file (incl. Motion to ` +
