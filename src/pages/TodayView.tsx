@@ -2,15 +2,23 @@ import { useMemo, useState } from 'react';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
 import type { FollowUp, Lead } from '../types';
-import { balanceOf, isActiveLead, isFinancingClient, isSalePending } from '../lib/leadFlow';
+import {
+  balanceOf,
+  chaseAngleForTouch,
+  isActiveLead,
+  isFinancingClient,
+  isRipe,
+  isSalePending,
+} from '../lib/leadFlow';
 import { DAY } from '../lib/followups';
-import { courtDatePassed, fmtMoney, paymentPastDue } from '../lib/dates';
+import { courtDatePassed, daysUntilCourt, fmtMoney, fmtShort, paymentPastDue } from '../lib/dates';
 import { completeFollowUp } from '../lib/actions';
 import { Badge } from '../components/ui/Badge';
 
 const FOLLOWUP_LABELS: Record<FollowUp['type'], string> = {
   callback: 'Call back',
   nurture: 'Nurture check-in',
+  chase: 'Chase call',
   week_before: 'Week-before-court call',
   day_before: 'Day-before-court call',
   warrant: 'Warrant follow-up',
@@ -51,6 +59,7 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
     const moneyOnTable: Task[] = [];
     const courtPassed: Task[] = [];
     const collections: Task[] = [];
+    const ripe: Task[] = [];
     const overdue: Task[] = [];
     const dueToday: Task[] = [];
     const uncontacted: Task[] = [];
@@ -96,7 +105,26 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
       const od = pending.find((f) => f.dueAt < todayStart);
       const td = pending.find((f) => f.dueAt >= todayStart && f.dueAt < todayEnd);
 
-      // 3. Overdue follow-up.
+      // 3. Ripe — pitched/voicemailed but never a real conversation, court
+      //    still far enough out that the chase is running. These alive-but-
+      //    idle files used to hide behind far-future court reminders; they
+      //    outrank the generic overdue noise so the silence stays visible.
+      if (isRipe(l)) {
+        const attempts = l.contactAttempts ?? [];
+        const lastTouch = attempts.reduce((m, a) => Math.max(m, a.ts), 0);
+        const sinceDays = Math.max(0, Math.floor((now - lastTouch) / DAY));
+        const courtDays = daysUntilCourt(l);
+        const bits = [
+          `${attempts.length} touch${attempts.length === 1 ? '' : 'es'}`,
+          `last ${sinceDays}d ago`,
+          `court ${fmtShort(l.nextCourtDate)} — in ${courtDays}d`,
+          `Angle: ${chaseAngleForTouch(attempts.length + 1)}`,
+        ];
+        ripe.push({ lead: l, why: bits.join(' · ') });
+        continue;
+      }
+
+      // 4. Overdue follow-up.
       if (od) {
         overdue.push({ lead: l, why: `Overdue ${agingLabel(now - od.dueAt)} — ${labelFor(od)}`, followUpId: od.id });
         continue;
@@ -126,11 +154,13 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
         (b.lead.salePromisedAt ?? b.lead.saleStatusAt ?? 0),
     );
     collections.sort((a, b) => balanceOf(b.lead) - balanceOf(a.lead));
+    // Soonest court date first — that pitch expires first.
+    ripe.sort((a, b) => (daysUntilCourt(a.lead) ?? Infinity) - (daysUntilCourt(b.lead) ?? Infinity));
     uncontacted.sort(
       (a, b) => (a.lead.receivedAt ?? a.lead.createdAt) - (b.lead.receivedAt ?? b.lead.createdAt),
     );
 
-    return { moneyOnTable, courtPassed, collections, overdue, dueToday, uncontacted, stalled };
+    return { moneyOnTable, courtPassed, collections, ripe, overdue, dueToday, uncontacted, stalled };
   }, [leads, now, todayStart, todayEnd]);
 
   const promisedTotal = buckets.moneyOnTable.reduce(
@@ -142,6 +172,7 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
     buckets.moneyOnTable.length +
     buckets.courtPassed.length +
     buckets.collections.length +
+    buckets.ripe.length +
     buckets.overdue.length +
     buckets.dueToday.length +
     buckets.uncontacted.length +
@@ -184,6 +215,7 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
           />
           <Section title="Court date passed" subtitle="Set a new date or mark the case dismissed" tone="red" tasks={buckets.courtPassed} onOpen={selectLead} />
           <Section title="Payment past due" subtitle="Clients behind on a payment plan" tone="red" tasks={buckets.collections} onOpen={selectLead} />
+          <RipeSection tasks={buckets.ripe} onOpen={selectLead} />
           <Section title="Overdue follow-ups" subtitle="Past their date — do these first" tone="red" tasks={buckets.overdue} onOpen={selectLead} />
           <Section title="Due today" subtitle="Follow-ups scheduled for today" tone="amber" tasks={buckets.dueToday} onOpen={selectLead} />
           <Section title="New initial leads" subtitle="Uncontacted — speed to first call wins" tone="blue" tasks={buckets.uncontacted} onOpen={selectLead} />
@@ -226,6 +258,39 @@ function MoneyOnTableSection({
             {tasks.length}
           </Badge>
         </div>
+      </div>
+      <ul className="space-y-2">
+        {tasks.map((t) => (
+          <Row key={t.lead.id} task={t} onOpen={onOpen} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// Warm amber section for the alive-but-idle chase queue: pitched (or at least
+// voicemailed), never a real conversation, court date still far enough out
+// that the chase cadence is running. Deliberately warmer than the red
+// emergency sections and quieter than the gold Money treatment — these are
+// opportunities ripening, not fires.
+function RipeSection({
+  tasks,
+  onOpen,
+}: {
+  tasks: Task[];
+  onOpen: (id: string) => void;
+}) {
+  if (tasks.length === 0) return null;
+  return (
+    <section className="rounded-2xl bg-gradient-to-r from-orange-500/15 via-amber-500/10 to-orange-500/15 p-4 ring-1 ring-orange-400/40">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h2 className="font-hand text-2xl text-orange-300">Ripe — Pitched, No Answer</h2>
+          <p className="text-manila/60 text-xs">
+            Voicemails aren't contacts — keep chasing before court gets close
+          </p>
+        </div>
+        <Badge tone="amber">{tasks.length}</Badge>
       </div>
       <ul className="space-y-2">
         {tasks.map((t) => (

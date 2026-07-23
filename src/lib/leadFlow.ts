@@ -1,5 +1,7 @@
+import { differenceInCalendarDays, isValid, parseISO } from 'date-fns';
 import type {
   ContactOutcome,
+  FollowUp,
   Lead,
   Stage,
 } from '../types';
@@ -31,6 +33,75 @@ export const OUTCOME_LABELS: Record<ContactOutcome, string> = {
 // lead that hasn't actually been retained/closed yet.
 export function isSalePending(lead: Lead): boolean {
   return lead.saleStatus === 'promised_unpaid' && isActiveLead(lead);
+}
+
+// --- The chase (idle-but-alive leads) ----------------------------------------
+// A voicemail or no-answer is NOT a contact. Until one of these outcomes is
+// logged, the lead has never had a real two-way conversation and the cadence
+// engine keeps chasing it. Mirrors CONVERSATION_OUTCOMES in
+// functions/src/cadence.ts — keep the two lists in sync.
+export const CONVERSATION_OUTCOMES: ContactOutcome[] = [
+  'spoke',
+  'thinking',
+  'declined',
+  'verbal_yes',
+  'wants_attorney',
+  'retained',
+  'lost',
+];
+
+// The chase stops after this many total attempts with no conversation.
+// Mirrors MAX_CHASE_ATTEMPTS in functions/src/cadence.ts.
+export const MAX_CHASE_ATTEMPTS = 8;
+
+// Once the next touch would land inside this window before the court date,
+// the chase stands down and the free court-reminder remarketing is the final
+// hook. Mirrors CHASE_COURT_BUFFER_DAYS in functions/src/cadence.ts.
+export const CHASE_COURT_BUFFER_DAYS = 21;
+
+// Has a real two-way conversation ever happened on this lead?
+export function hasConversation(lead: Lead): boolean {
+  if (lead.lastConnectedAt) return true;
+  return (lead.contactAttempts ?? []).some((a) => CONVERSATION_OUTCOMES.includes(a.outcome));
+}
+
+// Escalating script angle for a chase touch number. Mirrors chaseAngleForTouch
+// in functions/src/cadence.ts — keep the copy in sync.
+export function chaseAngleForTouch(touch: number): string {
+  if (touch <= 2) return 'Be specific: court date, county, what a conviction does to a CDL';
+  if (touch === 3) return 'Anchor price + ease: most drivers never appear in person — we handle it';
+  return 'Deadline framing: we need time to file entry of appearance';
+}
+
+// The cadence engine's pending chase follow-up on this lead, if any.
+export function pendingChaseFollowUp(lead: Lead): FollowUp | null {
+  return (lead.followUps ?? []).find((f) => !f.done && f.type === 'chase') ?? null;
+}
+
+// Days until the court date (negative = passed), or null when none is set.
+// Local copy so leadFlow doesn't import ./dates (which imports this module).
+function courtInDays(lead: Lead): number | null {
+  if (!lead.nextCourtDate) return null;
+  const d = parseISO(lead.nextCourtDate);
+  return isValid(d) ? differenceInCalendarDays(d, new Date()) : null;
+}
+
+// RIPE: pitched (or at least voicemailed) but never a real conversation, with
+// a future court date far enough out that the chase is still running. These
+// are alive-but-idle files the far-future court reminders used to mask —
+// they get their own warm queue on the Today view. Not ripe once the court
+// date is inside the pre-court remarketing window (the court reminders own
+// the lead then), once the chase is exhausted, or once money is promised/paid
+// (those have their own billing tracks).
+export function isRipe(lead: Lead): boolean {
+  if (!isActiveLead(lead) || lead.deletedAt) return false;
+  const attempts = lead.contactAttempts ?? [];
+  if (attempts.length === 0 || attempts.length >= MAX_CHASE_ATTEMPTS) return false;
+  if (lead.cadenceExhaustedAt) return false;
+  if (hasConversation(lead)) return false;
+  if (lead.saleStatus && lead.saleStatus !== 'none') return false;
+  const days = courtInDays(lead);
+  return days !== null && days > CHASE_COURT_BUFFER_DAYS;
 }
 
 // Leads shown on the main notepad board (active intake, not yet decided/handed off).

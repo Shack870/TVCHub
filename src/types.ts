@@ -30,6 +30,7 @@ export type SaleStatus = 'none' | 'paid_full' | 'paid_partial' | 'promised_unpai
 export type FollowUpType =
   | 'callback'
   | 'nurture'
+  | 'chase' // cadence-engine chase touch: pitched/voicemailed but never a conversation
   | 'week_before'
   | 'day_before'
   | 'warrant'

@@ -69,8 +69,13 @@ export async function applyOutcome(
     } else {
       const f = computeFollow(outcome, fresh.nextCourtDate, opts.followDate, opts.followType ?? null);
       if (f) {
+        // A logged call IS the pending chase touch — close it so the cadence
+        // engine schedules the next one instead of stacking on a stale note.
+        const closed = (fresh.followUps ?? []).map((fu) =>
+          !fu.done && fu.type === 'chase' ? { ...fu, done: true, doneAt: now } : fu,
+        );
         patch.followUps = [
-          ...(fresh.followUps ?? []),
+          ...closed,
           { id: uid(), type: f.type, dueAt: f.at, done: false, note: f.note },
         ];
       }
@@ -133,8 +138,10 @@ export async function logNoContact(
   await mutateLead(lead.id, (fresh) => {
     const now = Date.now();
     const attempt: ContactAttempt = { ts: now, outcome, by };
+    // The call resolves any pending callback AND the cadence engine's chase
+    // touch — the sweep will schedule the next chase step off this attempt.
     const followUps: FollowUp[] = (fresh.followUps ?? []).filter(
-      (f) => !(f.type === 'callback' && !f.done),
+      (f) => !((f.type === 'callback' || f.type === 'chase') && !f.done),
     );
     followUps.push({ id: uid(), type: 'callback', dueAt: now + DAY, done: false, note: 'Call back' });
     return {

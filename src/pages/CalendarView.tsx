@@ -30,6 +30,7 @@ interface CalEvent {
 const FOLLOWUP_LABEL: Record<FollowUpType, string> = {
   callback: 'Call back',
   nurture: 'Nurture',
+  chase: 'Chase call',
   week_before: 'Week before court',
   day_before: 'Day before court',
   warrant: 'Warrant',

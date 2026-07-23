@@ -1546,6 +1546,7 @@ function LogBar({
 const FOLLOWUP_LABELS: Record<FollowUpType, string> = {
   callback: 'Call back',
   nurture: 'Nurture check-in',
+  chase: 'Chase call',
   week_before: 'Week-before-court call',
   day_before: 'Day-before-court call',
   warrant: 'Warrant follow-up',

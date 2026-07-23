@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   balanceOf,
+  chaseAngleForTouch,
   isActiveLead,
   isClient,
   isFinancingClient,
   isOnBoard,
   isPaidInFull,
+  isRipe,
   isTerminal,
   makeEmptyLead,
   paidOf,
@@ -103,6 +105,74 @@ describe('financing math', () => {
       financing: { totalFee: 0, warrantFee: 500, payments: [] },
     });
     expect(isFinancingClient(warrant)).toBe(true);
+  });
+});
+
+describe('isRipe (the chase queue)', () => {
+  const DAY = 86400_000;
+  const iso = (daysOut: number) =>
+    new Date(Date.now() + daysOut * DAY).toISOString().slice(0, 10);
+  // The James-Thomas shape: one voicemail, silence, court far out.
+  const ripeLead = (over: Partial<ReturnType<typeof makeLead>> = {}) =>
+    makeLead({
+      stage: 'callback',
+      contactAttempts: [{ ts: Date.now() - 21 * DAY, outcome: 'voicemail' }],
+      nextCourtDate: iso(45),
+      ...over,
+    });
+
+  it('flags a voicemailed lead with a far-future court date', () => {
+    expect(isRipe(ripeLead())).toBe(true);
+  });
+
+  it('a voicemail or no-answer is not a conversation, but spoke/thinking are', () => {
+    expect(
+      isRipe(
+        ripeLead({
+          contactAttempts: [
+            { ts: Date.now() - 30 * DAY, outcome: 'voicemail' },
+            { ts: Date.now() - 21 * DAY, outcome: 'no_answer' },
+          ],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isRipe(ripeLead({ contactAttempts: [{ ts: Date.now(), outcome: 'spoke' }] })),
+    ).toBe(false);
+    expect(
+      isRipe(ripeLead({ contactAttempts: [{ ts: Date.now(), outcome: 'thinking' }] })),
+    ).toBe(false);
+    expect(isRipe(ripeLead({ lastConnectedAt: Date.now() }))).toBe(false);
+  });
+
+  it('not ripe when uncontacted, exhausted, or court is inside the reminder window', () => {
+    expect(isRipe(ripeLead({ contactAttempts: [] }))).toBe(false);
+    expect(isRipe(ripeLead({ cadenceExhaustedAt: Date.now() }))).toBe(false);
+    expect(isRipe(ripeLead({ nextCourtDate: iso(14) }))).toBe(false); // reminders own it
+    expect(isRipe(ripeLead({ nextCourtDate: null }))).toBe(false);
+    expect(
+      isRipe(
+        ripeLead({
+          contactAttempts: Array.from({ length: 8 }, (_, i) => ({
+            ts: Date.now() - i * DAY,
+            outcome: 'voicemail' as const,
+          })),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('not ripe once money is promised or paid (billing owns those)', () => {
+    expect(isRipe(ripeLead({ saleStatus: 'promised_unpaid' }))).toBe(false);
+    expect(isRipe(ripeLead({ saleStatus: 'paid_full' }))).toBe(false);
+    expect(isRipe(ripeLead({ saleStatus: 'none' }))).toBe(true);
+  });
+
+  it('escalates the script angle by touch number', () => {
+    expect(chaseAngleForTouch(2)).toMatch(/CDL/);
+    expect(chaseAngleForTouch(3)).toMatch(/price/);
+    expect(chaseAngleForTouch(4)).toMatch(/entry of appearance/);
+    expect(chaseAngleForTouch(7)).toMatch(/entry of appearance/);
   });
 });
 

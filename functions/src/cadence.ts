@@ -6,10 +6,16 @@ import { ensureFollowUp } from "./callrail.js";
 // Daily contact-cadence sweep (7:00 AM Central, before the calling day).
 //
 // Mirrors the firm's funnel:
-//   1. CHASE — until a real conversation happens, keep a callback on the
-//      schedule: daily for the first 4 attempts, every 2 days through 6,
-//      every 3 days through 9. At 10 attempts with no connection the chase
-//      stops and a decision post-it goes on the desk.
+//   1. CHASE — a voicemail is NOT a contact. Until a real conversation
+//      happens, keep the next touch on the schedule on a decaying cadence
+//      keyed off the last attempt: #1→+2d, #2→+3d, #3→+6d, #4+→weekly.
+//      Every chase follow-up carries the touch number, an escalating script
+//      angle, and a time-of-day hint. The chase HARD-STOPS when the next
+//      touch would land within 21 days of the court date (the free
+//      court-reminder remarketing becomes the final hook) or after
+//      8 total attempts, at which point a decision post-it goes on the desk.
+//      Chase follow-ups coexist with the far-future court reminders — a
+//      parked week-before/day-before reminder no longer masks the silence.
 //   2. DECIDE — connected but undecided (they're "thinking"): a follow-up
 //      every 3 days so a pitch never goes quiet.
 //   3. REMARKET — any active unsold lead with a future court date gets free
@@ -37,12 +43,66 @@ const PLAN_STALL_DAYS = 35;
 
 const ACTIVE_STAGES = ["new", "callback", "pitched", "attorney_call", "nurture"];
 
-// Gap required since the last attempt before the next auto callback.
+// Outcomes that mean a real two-way conversation happened. A voicemail or
+// no-answer is NOT a contact — the chase keeps running until one of these
+// lands. Mirrors CONVERSATION_OUTCOMES in src/lib/leadFlow.ts.
+const CONVERSATION_OUTCOMES = [
+  "spoke",
+  "thinking",
+  "declined",
+  "verbal_yes",
+  "wants_attorney",
+  "retained",
+  "lost",
+];
+
+// The chase stops for good after this many total attempts with no
+// conversation. Mirrors MAX_CHASE_ATTEMPTS in src/lib/leadFlow.ts.
+const MAX_CHASE_ATTEMPTS = 8;
+
+// Once the next touch would land inside this window before the court date,
+// the chase stands down — the free court-reminder remarketing (week-before /
+// day-before) becomes the final hook. Mirrors CHASE_COURT_BUFFER_DAYS in
+// src/lib/leadFlow.ts.
+const CHASE_COURT_BUFFER_DAYS = 21;
+
+// Decaying gap (days) since the last attempt before the next chase touch.
+// attempts so far: 1→+2, 2→+3, 3→+6, 4→+7, 5+→weekly; null = exhausted.
 function chaseGapDays(attemptCount: number): number | null {
-  if (attemptCount < 4) return 1;
-  if (attemptCount < 7) return 2;
-  if (attemptCount < 10) return 3;
+  if (attemptCount <= 1) return 2;
+  if (attemptCount === 2) return 3;
+  if (attemptCount === 3) return 6;
+  if (attemptCount < MAX_CHASE_ATTEMPTS) return 7;
   return null; // cadence exhausted
+}
+
+// Escalating script angle for a given chase touch number. Mirrors
+// chaseAngleForTouch in src/lib/leadFlow.ts — keep the copy in sync.
+function chaseAngleForTouch(touch: number): string {
+  if (touch <= 2) return "Be specific: court date, county, what a conviction does to a CDL";
+  if (touch === 3) return "Anchor price + ease: most drivers never appear in person — we handle it";
+  return "Deadline framing: we need time to file entry of appearance";
+}
+
+// Full note for a chase follow-up: touch number, script angle, a
+// time-of-day hint (drivers pick up at different hours), and — when the
+// last attempt was a voicemail — a prompt for the office to shadow it with
+// an email. The email is sent by a human; the note is only the prompt.
+function chaseNote(touch: number, lastAttemptTs: number, lastOutcome: string): string {
+  const hour = Number(
+    new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      hour12: false,
+      timeZone: "America/Chicago",
+    }).format(new Date(lastAttemptTs)),
+  );
+  const todHint =
+    hour < 15 ? "Last try was before 3pm — try evening." : "Last try was after 3pm — try morning.";
+  let note = `Chase touch #${touch} — ${chaseAngleForTouch(touch)}. ${todHint}`;
+  if (lastOutcome === "voicemail") {
+    note += " Shadow it with an email referencing the voicemail.";
+  }
+  return note;
 }
 
 async function postIt(
@@ -115,11 +175,12 @@ export const cadenceSweep = onSchedule(
       const lastAttemptTs = attempts.reduce((m, a) => Math.max(m, a.ts ?? 0), 0);
       const connected =
         Boolean(d.lastConnectedAt) ||
-        attempts.some((a) =>
-          ["spoke", "thinking", "declined", "retained", "wants_attorney"].includes(
-            a.outcome ?? "",
-          ),
-        );
+        attempts.some((a) => CONVERSATION_OUTCOMES.includes(a.outcome ?? ""));
+      const courtDate =
+        typeof d.nextCourtDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.nextCourtDate)
+          ? (d.nextCourtDate as string)
+          : null;
+      const courtMs = courtDate ? new Date(`${courtDate}T09:00:00-05:00`).getTime() : null;
 
       // --- 0. BILLING: they said yes but haven't paid ------------------------
       // Hottest track — the pitch is done and money was promised, so nothing
@@ -210,8 +271,12 @@ export const cadenceSweep = onSchedule(
           if (added) billing++;
         }
         // Billing owns this lead's cadence; court reminders still apply below.
+      } else if (typeof d.saleStatus === "string" && d.saleStatus.startsWith("paid")) {
+        // Paid leads have their own billing/graduation handling (syncSquare /
+        // the Square-verify alarm) — no chase or nudge. Court reminders still
+        // apply below.
       } else if (!connected) {
-        // --- 1. CHASE: no conversation yet -----------------------------------
+        // --- 1. CHASE: no real conversation yet — a voicemail doesn't count --
         const gap = chaseGapDays(attempts.length);
         if (gap === null) {
           // Exhausted. Flag once; court reminders (below) keep running.
@@ -229,13 +294,53 @@ export const cadenceSweep = onSchedule(
             );
             flagged++;
           }
-        } else if (openFollowUps.length === 0 && now - lastAttemptTs >= gap * DAY) {
-          const added = await ensureFollowUp(db, lead.id, {
-            dueAt: now,
-            note: `Auto cadence — attempt #${attempts.length + 1} (no connection yet)`,
-            withinMs: 12 * 3600_000,
-          });
-          if (added) chased++;
+        } else if (attempts.length === 0) {
+          // Never touched: put the first attempt on the schedule if nothing is.
+          if (openFollowUps.length === 0) {
+            const added = await ensureFollowUp(db, lead.id, {
+              dueAt: now,
+              note: "Auto cadence — attempt #1 (never contacted)",
+              withinMs: 12 * 3600_000,
+            });
+            if (added) chased++;
+          }
+        } else {
+          const last = attempts.reduce((m, a) => ((a.ts ?? 0) >= (m.ts ?? 0) ? a : m));
+          const lastOutcome = last.outcome ?? "";
+          if (lastOutcome === "voicemail" || lastOutcome === "no_answer") {
+            // Next touch on the decaying schedule, keyed off the last attempt
+            // (never in the past — the sweep runs daily and catches up).
+            const dueAt = Math.max(now, lastAttemptTs + gap * DAY);
+            // HARD STOP: once the next touch would land inside the pre-court
+            // window, the court-reminder remarketing is the final hook.
+            const insideCourtWindow =
+              courtMs !== null && courtMs - dueAt <= CHASE_COURT_BUFFER_DAYS * DAY;
+            // Idempotent: any open non-court-reminder follow-up (a pending
+            // chase, a manual callback, a billing touch) means the next touch
+            // is already scheduled. Far-future court reminders deliberately
+            // do NOT count — they were masking three-week silences.
+            const hasOpenTouch = openFollowUps.some(
+              (f) => !["week_before", "day_before", "warrant"].includes(f.type ?? ""),
+            );
+            if (!insideCourtWindow && !hasOpenTouch) {
+              const added = await ensureFollowUp(db, lead.id, {
+                dueAt,
+                note: chaseNote(attempts.length + 1, lastAttemptTs, lastOutcome),
+                withinMs: 12 * 3600_000,
+                type: "chase",
+              });
+              if (added) chased++;
+            }
+          } else if (openFollowUps.length === 0 && now - lastAttemptTs >= gap * DAY) {
+            // Odd last outcome (auto-logged email/etc.) — keep the legacy
+            // generic callback so the lead still can't go silent.
+            const added = await ensureFollowUp(db, lead.id, {
+              dueAt: now,
+              note: `Auto cadence — attempt #${attempts.length + 1} (no connection yet)`,
+              withinMs: 12 * 3600_000,
+            });
+            if (added) chased++;
+          }
         }
         // Chase phase handled; still fall through to court reminders below.
       } else if (!["retained", "financed", "intake_complete", "lost"].includes(d.stage)) {
@@ -251,9 +356,7 @@ export const cadenceSweep = onSchedule(
       }
 
       // --- 3. REMARKET: free court-date reminders for unsold leads ---------
-      const courtDate = typeof d.nextCourtDate === "string" ? d.nextCourtDate : null;
-      if (courtDate && /^\d{4}-\d{2}-\d{2}$/.test(courtDate)) {
-        const courtMs = new Date(`${courtDate}T09:00:00-05:00`).getTime();
+      if (courtDate && courtMs !== null) {
         if (courtMs > now) {
           const targets: { type: string; dueAt: number; note: string }[] = [
             {
