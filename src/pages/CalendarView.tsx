@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { motion } from 'framer-motion';
 import {
   addMonths,
   eachDayOfInterval,
@@ -17,6 +18,7 @@ import { useUI } from '../store/useUI';
 import type { FollowUpType, Lead } from '../types';
 import { completeFollowUp } from '../lib/actions';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
+import { Modal } from '../components/ui/Modal';
 
 interface CalEvent {
   leadId: string;
@@ -75,6 +77,7 @@ export function CalendarView() {
   const [selected, setSelected] = useState(new Date());
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [dayCard, setDayCard] = useState<Date | null>(null);
 
   const events = useMemo(() => leads.flatMap(leadEvents), [leads]);
 
@@ -175,7 +178,10 @@ export function CalendarView() {
               return (
                 <div
                   key={k}
-                  onClick={() => setSelected(day)}
+                  onClick={() => {
+                    setSelected(day);
+                    setDayCard(day);
+                  }}
                   className={`flex min-h-[82px] cursor-pointer flex-col rounded-md border p-1 text-left transition ${
                     sel ? 'border-pad-ink ring-1 ring-pad-ink' : 'border-black/5'
                   } ${dim ? 'bg-black/[0.02] opacity-50' : 'bg-white/60 hover:bg-white'}`}
@@ -211,6 +217,7 @@ export function CalendarView() {
                         onClick={(ev) => {
                           ev.stopPropagation();
                           setSelected(day);
+                          setDayCard(day);
                         }}
                         className="font-type text-[10px] text-pad-inkSoft/60 hover:underline"
                       >
@@ -275,6 +282,16 @@ export function CalendarView() {
         </div>
       </div>
 
+      <DayCardModal
+        date={dayCard}
+        leads={leads}
+        onClose={() => setDayCard(null)}
+        onOpenLead={(id) => {
+          setDayCard(null);
+          selectLead(id);
+        }}
+      />
+
       <ConfirmDialog
         open={confirmClear}
         title="Clear all overdue?"
@@ -315,6 +332,214 @@ function Panel({
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="font-type text-xs text-manila/50">{children}</p>;
+}
+
+// The tear-off day card: clicking a day in the month grid rips that page off
+// the desk calendar and drops it on the screen — court dates in red ink,
+// follow-ups as handwritten lines, handled ones struck through at the bottom.
+function DayCardModal({
+  date,
+  leads,
+  onClose,
+  onOpenLead,
+}: {
+  date: Date | null;
+  leads: Lead[];
+  onClose: () => void;
+  onOpenLead: (leadId: string) => void;
+}) {
+  // While closed/exiting the Modal's AnimatePresence shows a frozen snapshot
+  // of the last open render, so this fallback value is never actually seen.
+  const shown = date ?? new Date();
+
+  const key = format(shown, 'yyyy-MM-dd');
+  const todayKey = format(new Date(), 'yyyy-MM-dd');
+  const isPast = key < todayKey;
+
+  // Same universe the month grid draws from (active court dates + open
+  // follow-ups), plus the day's already-handled follow-ups so the page reads
+  // like a real day sheet — done lines get struck through, not erased.
+  const { courts, open, handled } = useMemo(() => {
+    const courts: Lead[] = [];
+    const open: { lead: Lead; f: NonNullable<Lead['followUps']>[number] }[] = [];
+    const handled: typeof open = [];
+    for (const lead of leads) {
+      if (
+        lead.nextCourtDate === key &&
+        !lead.caseDismissed &&
+        lead.stage !== 'intake_complete' &&
+        lead.stage !== 'lost'
+      ) {
+        courts.push(lead);
+      }
+      for (const f of lead.followUps ?? []) {
+        if (format(new Date(f.dueAt), 'yyyy-MM-dd') !== key) continue;
+        (f.done ? handled : open).push({ lead, f });
+      }
+    }
+    open.sort((a, b) => a.f.dueAt - b.f.dueAt);
+    handled.sort((a, b) => a.f.dueAt - b.f.dueAt);
+    return { courts, open, handled };
+  }, [leads, key]);
+
+  const paper = 'linear-gradient(180deg, #fdf6cf 0%, #f7edb9 100%)';
+  const docket = courts.length + open.length;
+
+  return (
+    <Modal open={date !== null} onClose={onClose} width="max-w-md">
+      <div style={{ perspective: '1200px' }}>
+        <motion.div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Schedule for ${format(shown, 'EEEE, MMMM d, yyyy')}`}
+          initial={{ rotateX: -75, opacity: 0 }}
+          animate={{ rotateX: 0, opacity: 1 }}
+          transition={{ type: 'spring', stiffness: 210, damping: 20 }}
+          style={{ transformOrigin: 'top center' }}
+          className="-rotate-1"
+        >
+          {/* torn top edge — this page was ripped off the desk calendar */}
+          <div
+            aria-hidden
+            className="h-[12px] w-full"
+            style={{
+              background:
+                'linear-gradient(-45deg, transparent 8px, #fdf6cf 0), linear-gradient(45deg, transparent 8px, #fdf6cf 0)',
+              backgroundPosition: 'left top',
+              backgroundRepeat: 'repeat-x',
+              backgroundSize: '16px 16px',
+            }}
+          />
+          <div
+            className="rounded-b-md px-5 pb-5 shadow-card"
+            style={{ background: paper }}
+          >
+            {/* date block, like the corner of a page-a-day calendar */}
+            <div className="flex items-start justify-between gap-3 border-b-2 border-pad-ink/15 pb-3 pt-2">
+              <div>
+                <p className="font-type text-[10px] font-bold uppercase tracking-widest text-pad-inkSoft/70">
+                  {format(shown, 'EEEE')}
+                </p>
+                <p className="font-type text-6xl leading-none text-pad-ink">
+                  {format(shown, 'd')}
+                </p>
+                <p className="mt-1 font-type text-[10px] font-bold uppercase tracking-widest text-pad-inkSoft/70">
+                  {format(shown, 'MMMM yyyy')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <span className="font-type text-[10px] uppercase tracking-widest text-pad-inkSoft/60">
+                  {docket === 0 ? 'clear' : `${docket} on the docket`}
+                </span>
+                <button
+                  type="button"
+                  autoFocus
+                  aria-label="Close day view"
+                  onClick={onClose}
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-black/10 font-type text-sm font-bold text-pad-ink transition hover:bg-black/20"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {docket === 0 && handled.length === 0 ? (
+              <p className="-rotate-2 py-8 text-center font-hand text-2xl text-pad-ink/50">
+                Nothing on the docket — enjoy the quiet day.
+              </p>
+            ) : (
+              <div className="divide-y divide-black/10">
+                {courts.map((lead) => {
+                  const prep = (lead.followUps ?? [])
+                    .filter((f) => !f.done && (f.type === 'week_before' || f.type === 'day_before'))
+                    .map((f) => FOLLOWUP_LABEL[f.type].toLowerCase());
+                  const meta = [
+                    lead.nextCourtTime,
+                    lead.nextCourtType,
+                    lead.courtName || (lead.county ? `${lead.county} County` : null),
+                  ].filter(Boolean);
+                  return (
+                    <button
+                      key={`court-${lead.id}`}
+                      type="button"
+                      onClick={() => onOpenLead(lead.id)}
+                      className="block w-full py-2.5 text-left transition hover:bg-black/5"
+                    >
+                      <p className="font-hand text-2xl leading-tight text-pad-red">
+                        ⚖ {lead.name} — court
+                      </p>
+                      {meta.length > 0 && (
+                        <p className="font-type text-[11px] text-pad-inkSoft">
+                          {meta.join(' · ')}
+                        </p>
+                      )}
+                      {prep.length > 0 && (
+                        <p className="font-type text-[10px] text-pad-inkSoft/60">
+                          prep reminders pending: {prep.join(', ')}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })}
+
+                {open.map(({ lead, f }) => (
+                  <div key={`fu-${lead.id}-${f.id}`} className="flex items-center gap-2 py-2.5">
+                    <button
+                      type="button"
+                      onClick={() => onOpenLead(lead.id)}
+                      className="min-w-0 flex-1 rounded text-left transition hover:bg-black/5"
+                    >
+                      <p
+                        className={`truncate font-hand text-2xl leading-tight ${
+                          isPast ? 'text-pad-red' : 'text-pad-ink'
+                        }`}
+                      >
+                        {lead.name}
+                      </p>
+                      <p className="truncate font-type text-[11px] text-pad-inkSoft">
+                        {FOLLOWUP_LABEL[f.type]}
+                        {f.note ? ' · ' + f.note : ''}
+                      </p>
+                    </button>
+                    {isPast && (
+                      <span className="stamp shrink-0 -rotate-6 text-[9px] text-pad-red">
+                        Overdue
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      className="shrink-0 rounded bg-emerald-600 px-2 py-1 font-type text-xs font-semibold text-white transition hover:bg-emerald-500"
+                      onClick={() => completeFollowUp(lead, f.id)}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ))}
+
+                {handled.length > 0 && (
+                  <div className="pt-2.5">
+                    <p className="font-type text-[10px] font-bold uppercase tracking-widest text-pad-inkSoft/50">
+                      Handled
+                    </p>
+                    {handled.map(({ lead, f }) => (
+                      <button
+                        key={`done-${lead.id}-${f.id}`}
+                        type="button"
+                        onClick={() => onOpenLead(lead.id)}
+                        className="block w-full truncate text-left font-hand text-lg leading-snug text-pad-ink/40 line-through transition hover:text-pad-ink/60"
+                      >
+                        ✓ {lead.name} — {FOLLOWUP_LABEL[f.type]}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </motion.div>
+      </div>
+    </Modal>
+  );
 }
 
 function EventRow({
