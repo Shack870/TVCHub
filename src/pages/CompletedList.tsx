@@ -15,7 +15,11 @@ export function CompletedList() {
   const openFinancing = useUI((s) => s.openFinancing);
 
   const completed = useMemo(
-    () => leads.filter((l) => l.stage === 'intake_complete'),
+    () =>
+      leads
+        .filter((l) => l.stage === 'intake_complete')
+        // Newest completions first; cards with no completed date sink to the bottom.
+        .sort((a, b) => (b.intakeCompleteAt ?? 0) - (a.intakeCompleteAt ?? 0)),
     [leads],
   );
 
