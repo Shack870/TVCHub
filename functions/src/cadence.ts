@@ -273,6 +273,11 @@ export const cadenceSweep = onSchedule(
     for (const doc of snap.docs) {
       const d = doc.data();
       if (d.deletedAt) continue;
+      // Unverified cards (needs-review) are never chased: their identity/data
+      // hasn't been confirmed by a human, and the ingest guards deliberately
+      // flag suspected re-sends of already-worked cases this way. The
+      // watchdog separately alerts on cards stuck in review > 24h.
+      if (d.needsReview) continue;
       const lead = {
         id: doc.id,
         name: (d.name as string) || "(unnamed)",
@@ -397,6 +402,13 @@ export const cadenceSweep = onSchedule(
         // Paid leads have their own billing/graduation handling (syncSquare /
         // the Square-verify alarm) — no chase or nudge. Court reminders still
         // apply below.
+      } else if (d.possibleExistingClientAt) {
+        // PAUSED — the transcript classifier (or QA) flagged this lead as a
+        // possible EXISTING client calling about a case the firm already
+        // handles. Chasing them as a prospect is exactly the failure the July
+        // QA found, so no chase and no nudge until a human resolves it:
+        // clearing the flag or marking the sale resumes normal flow. Court
+        // reminders below still run (free value either way).
       } else if (!connected) {
         // --- 1. CHASE: no real conversation yet — a voicemail doesn't count --
         const gap = chaseGapDays(attempts.length);

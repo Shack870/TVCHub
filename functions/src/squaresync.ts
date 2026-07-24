@@ -34,11 +34,28 @@ import { stampHeartbeat } from "./heartbeat.js";
 // (squarePayments/{paymentId}) make re-runs harmless, deleted leads are never
 // touched, and a paid_full lead is never downgraded. Business dates come from
 // the PAYMENT's created_at, not from when the sync got around to processing it.
+//
+// Markers are VERSIONED (matcherVersion): when the matcher itself improves,
+// recent unmatched/ignored markers written by an older generation are
+// re-evaluated once under the new one — see MATCHER_VERSION below.
 
 const SQUARE_ACCESS_TOKEN = defineSecret("SQUARE_ACCESS_TOKEN");
 const SQUARE = "https://connect.squareup.com/v2";
 const SQUARE_VERSION = "2026-06-18";
 const LOCATION_ID = "LPK9GY4PHM28J"; // Iron Rock Law Firm
+
+// Matcher generation, stamped on every marker doc. Bump it whenever the
+// matching logic learns a new trick: the sync re-evaluates recent
+// unmatched/ignored markers whose stored matcherVersion is older, so matcher
+// upgrades self-heal past decisions instead of freezing them (the July QA
+// found five retained clients still chased as prospects because their
+// markers were written by the pre-note-matcher sync and never looked at
+// again). v2 = the note-name/exact-name matcher generation.
+export const MATCHER_VERSION = 2;
+// Only markers newer than this get the re-check — keeps runs cheap and
+// acknowledges that stale-beyond-a-quarter money is a books problem, not a
+// board problem.
+const REEVAL_MAX_AGE_DAYS = 90;
 
 const last10 = (s: unknown): string =>
   String(s ?? "").replace(/\D/g, "").slice(-10);
@@ -95,6 +112,18 @@ async function fetchPayments(token: string, beginTime: string): Promise<SqPaymen
   return payments;
 }
 
+// Single-payment fetch, used by the marker re-evaluation pass for payments
+// that fell out of the incremental sync window.
+async function fetchPayment(token: string, id: string): Promise<SqPayment | null> {
+  const res = await fetch(`${SQUARE}/payments/${id}`, { headers: sqHeaders(token) });
+  if (!res.ok) {
+    logger.warn(`Square payment ${id} lookup failed: ${res.status}`);
+    return null;
+  }
+  const json = (await res.json()) as { payment?: SqPayment };
+  return json.payment ?? null;
+}
+
 async function fetchCustomer(token: string, id: string): Promise<SqCustomer | null> {
   const res = await fetch(`${SQUARE}/customers/${id}`, { headers: sqHeaders(token) });
   if (!res.ok) {
@@ -127,6 +156,41 @@ export const syncSquare = onSchedule(
 
     const payments = await fetchPayments(token, beginTime);
     const completed = payments.filter((p) => p.status === "COMPLETED");
+
+    // --- Marker re-evaluation: self-healing after matcher upgrades ---------
+    // Recent markers the matcher couldn't place under an OLDER generation get
+    // one more look under the current one. reEvalExempt markers (the
+    // Dessie/"Parmjeet Singh" ambiguous charge) are never re-run — those are
+    // human calls by design. Whatever the outcome, the marker gets stamped
+    // with the current matcherVersion, so each version bump re-checks each
+    // marker exactly once.
+    const reEvalIds = new Set<string>();
+    {
+      const staleSnap = await db
+        .collection("squarePayments")
+        .where("processedAt", ">", Date.now() - REEVAL_MAX_AGE_DAYS * 86400_000)
+        .select("action", "matcherVersion", "reEvalExempt")
+        .get();
+      const inWindow = new Set(completed.map((p) => p.id));
+      for (const m of staleSnap.docs) {
+        const d = m.data();
+        if (d.action !== "unmatched" && d.action !== "ignored_unrelated") continue;
+        if (((d.matcherVersion as number) ?? 1) >= MATCHER_VERSION) continue;
+        if (d.reEvalExempt) continue;
+        reEvalIds.add(m.id);
+        if (!inWindow.has(m.id)) {
+          const p = await fetchPayment(token, m.id);
+          if (p && p.status === "COMPLETED") completed.push(p);
+          else reEvalIds.delete(m.id); // can't re-check what Square won't return
+        }
+      }
+      if (reEvalIds.size) {
+        logger.info("Re-evaluating stale payment markers under current matcher", {
+          count: reEvalIds.size,
+          matcherVersion: MATCHER_VERSION,
+        });
+      }
+    }
 
     // Lead indexes over recent leads (covers the active board plus months of
     // history). Newest lead wins a shared phone/email; names must be unique
@@ -287,7 +351,9 @@ export const syncSquare = onSchedule(
 
     for (const payment of completed) {
       const marker = db.collection("squarePayments").doc(payment.id);
-      if ((await marker.get()).exists) continue;
+      // Re-evaluated payments deliberately pass the marker guard — their
+      // marker is the thing being reconsidered.
+      if (!reEvalIds.has(payment.id) && (await marker.get()).exists) continue;
 
       const cents = payment.amount_money?.amount ?? 0;
       const dollars = cents / 100;
@@ -486,7 +552,18 @@ export const syncSquare = onSchedule(
               `was keyed (${concurrentCandidates.map((l) => l.name).join(", ")}) and nothing ` +
               `on the payment picks between them`
             : null;
-        if (ambiguity) {
+        // A re-evaluated marker may hit the same ambiguity twice — one
+        // post-it per payment, ever (matched by squarePaymentId).
+        const alreadyPosted = ambiguity
+          ? !(
+              await db
+                .collection("messages")
+                .where("squarePaymentId", "==", payment.id)
+                .limit(1)
+                .get()
+            ).empty
+          : false;
+        if (ambiguity && !alreadyPosted) {
           const payerBits = [
             payerName ? `name: ${payerName}` : null,
             payerEmail ? `email: ${payerEmail}` : null,
@@ -522,19 +599,24 @@ export const syncSquare = onSchedule(
           });
           ambiguityPostIts++;
         }
-        await marker.set({
-          processedAt: Date.now(),
-          leadId: null,
-          action: ambiguity ? "unmatched" : "ignored_unrelated",
-          evidence: ambiguity ?? null,
-          concurrentCandidates: concurrentCandidates.length
-            ? concurrentCandidates.map((l) => l.name)
-            : null,
-          amountCents: cents,
-          payerName,
-          payerEmail,
-          payerPhone,
-        });
+        await marker.set(
+          {
+            processedAt: Date.now(),
+            leadId: null,
+            action: ambiguity ? "unmatched" : "ignored_unrelated",
+            evidence: ambiguity ?? null,
+            concurrentCandidates: concurrentCandidates.length
+              ? concurrentCandidates.map((l) => l.name)
+              : null,
+            amountCents: cents,
+            payerName,
+            payerEmail,
+            payerPhone,
+            matcherVersion: MATCHER_VERSION,
+          },
+          // Keep reEvalExempt & friends when refreshing a re-evaluated marker.
+          { merge: true },
+        );
         unmatched++;
         continue;
       }
@@ -663,13 +745,17 @@ export const syncSquare = onSchedule(
         escalationsCleared++;
       }
 
-      await marker.set({
-        processedAt: Date.now(),
-        leadId: lead.id,
-        action,
-        matchedBy,
-        amountCents: cents,
-      });
+      await marker.set(
+        {
+          processedAt: Date.now(),
+          leadId: lead.id,
+          action,
+          matchedBy,
+          amountCents: cents,
+          matcherVersion: MATCHER_VERSION,
+        },
+        { merge: true },
+      );
       matched++;
       logger.info("Square payment reconciled to lead", {
         paymentId: payment.id,

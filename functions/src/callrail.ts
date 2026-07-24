@@ -62,6 +62,12 @@ export interface CallAnalysis {
   // For promised_unpaid: WHY no money moved on this call — the caller's stated
   // reason, or an explicit call-out that the agent never attempted to collect.
   nonPaymentReason: string | null;
+  // The caller talks like an ALREADY-HIRED client (asking for a status update
+  // on a case the firm is handling), not a prospect being sold. When the app
+  // still has the lead as unsold, that mismatch means the retention likely
+  // happened outside the app's view — pause the sales cadence and ask a human
+  // (the July QA's "retained client chased as prospect" failure).
+  existingClientInquiry: boolean;
 }
 
 export const ANALYSIS_SYSTEM = `You analyze a phone call transcript between a law firm (Agent) and a traffic-case lead (Caller). The firm's funnel is: reach the lead ("connect"), pitch representation, then the lead buys, declines, or thinks about it.
@@ -78,6 +84,7 @@ Return ONLY a JSON object:
 - "paymentPlan": "full" (paying in one payment), "financed" (payment plan / installments discussed), or "unknown".
 - "paymentPromise": for promised_unpaid only — a short quote of what they committed to ("will pay Friday after payday"), else null.
 - "nonPaymentReason": for promised_unpaid only — 1-2 sentences explaining WHY money did not change hands on this call. If the caller gave a reason, state it ("Gets paid Friday and will call back then", "Needs to check with his boss who covers company tickets"). If the AGENT never asked for payment or never attempted to run a card, say that explicitly ("The agent never asked for payment on this call — the yes was left hanging with no collection attempt"). null when not promised_unpaid.
+- "existingClientInquiry": true ONLY when the caller speaks as an already-hired client checking on a case the firm is ALREADY handling (asking for a status update, court outcome, paperwork, or next steps on their existing case) rather than a prospect being pitched or shopping for representation. false when in doubt.
 Do not invent facts. If the transcript is empty or useless, use connection "unclear", empty summary.`;
 
 async function analyzeTranscript(
@@ -127,6 +134,7 @@ async function analyzeTranscript(
         : "unknown",
       paymentPromise: parsed.paymentPromise ? String(parsed.paymentPromise) : null,
       nonPaymentReason: parsed.nonPaymentReason ? String(parsed.nonPaymentReason) : null,
+      existingClientInquiry: Boolean(parsed.existingClientInquiry),
     };
   } catch (e) {
     logger.warn("Transcript analysis failed; falling back to basic logging", e);
@@ -517,6 +525,7 @@ export const syncCallRail = onSchedule(
         ...(analysis ? { ai: analysis as unknown as Record<string, unknown> } : {}),
       };
       let movedTo: string | null = null;
+      let flaggedExistingClient = false;
       await db.runTransaction(async (tx) => {
         const ref = db.collection("leads").doc(lead.id);
         const snap = await tx.get(ref);
@@ -534,6 +543,23 @@ export const syncCallRail = onSchedule(
           contactAttempts: [...attempts, attemptFinal],
           updatedAt: Date.now(),
         };
+        // EXISTING-CLIENT DETECTOR: the transcript reads as a status-update
+        // call from an already-hired client, but the app still has this lead
+        // as an unsold prospect — the retention likely happened outside the
+        // app's view. Never treat that call as sales momentum: stamp
+        // possibleExistingClientAt (the cadence sweep pauses its chase until
+        // a human clears the flag or the lead is marked sold) and put an
+        // Action Item on the desk. A confirmed-payment move outranks it.
+        if (
+          analysis?.existingClientInquiry &&
+          !move &&
+          !d.possibleExistingClientAt &&
+          !(typeof d.saleStatus === "string" && (d.saleStatus as string).startsWith("paid")) &&
+          AUTO_MOVE_FROM.includes(d.stage as string)
+        ) {
+          patch.possibleExistingClientAt = startedAt;
+          flaggedExistingClient = true;
+        }
         // A real conversation stamps the lead as connected — the cadence sweep
         // uses this to stop the daily chase.
         if (CONVERSATION_OUTCOMES.includes(outcome)) patch.lastConnectedAt = startedAt;
@@ -565,6 +591,43 @@ export const syncCallRail = onSchedule(
           leadId: lead.id,
           name: lead.name,
           to: movedTo,
+          callId: call.id,
+        });
+      }
+
+      // Possible existing client flagged above — put the verification ask on
+      // the desk (same Action Item treatment as the cadence engine's notes).
+      if (flaggedExistingClient && analysis) {
+        await db.collection("messages").add({
+          kind: "tvc_message",
+          source: "system",
+          from: "CallRail Sync",
+          fromName: "CallRail Sync",
+          subject: `Possible existing client — ${lead.name}`,
+          message:
+            `Possible existing client — ${lead.name} called for a case status update; ` +
+            `verify retention before sales outreach.\n` +
+            `The app still has them as an unsold prospect, so the retention may have happened ` +
+            `outside the app's view (check with the firm / Square). Sales chasing is PAUSED ` +
+            `until this is resolved — mark the sale (or clear the flag) to resume.\n` +
+            `What the call said: ${analysis.summary}` +
+            (call.recording_player ? `\nListen: ${call.recording_player}` : ""),
+          tvcCaseNumber: null,
+          memberName: lead.name,
+          leadId: lead.id,
+          phone: lead.phone || call.customer_phone_number || null,
+          email: lead.email,
+          gmailMessageId: null,
+          callrailCallId: call.id,
+          receivedAt: startedAt,
+          handled: false,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        postIts++;
+        logger.info("Flagged possible existing client; sales cadence paused", {
+          leadId: lead.id,
+          name: lead.name,
           callId: call.id,
         });
       }

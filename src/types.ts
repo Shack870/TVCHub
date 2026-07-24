@@ -219,6 +219,11 @@ export interface Lead {
   salePursuitAlertAt?: number | null; // no-pursuit alarm raised (no call since promise)
   squarePaidTotal?: number | null; // dollars collected via Square (see functions/src/squaresync.ts)
   squareVerifyFlaggedAt?: number | null; // transcript-says-paid-but-no-charge alarm raised
+  // Transcript sounded like an ALREADY-HIRED client asking for a status
+  // update while the app still shows an unsold prospect. The cadence sweep
+  // pauses its chase/nudge while set; a human clearing it (or the sale being
+  // marked) resumes normal flow. See functions/src/callrail.ts.
+  possibleExistingClientAt?: number | null;
   // Receivables watch: cadence flagged this financed plan as stalled (no
   // Square payment in 35+ days). Cleared by syncSquare when money arrives.
   planStallFlaggedAt?: number | null;

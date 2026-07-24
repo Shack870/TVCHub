@@ -9,6 +9,7 @@ import { convert as htmlToText } from "html-to-text";
 const BUCKET = "tvchub-f2401.firebasestorage.app";
 import { isTvcReferral, parseTvc } from "./parser.js";
 import { extractLead, extractLeadFromPdf } from "./llm.js";
+import { phoneLast10, staleReferralReason } from "./ingestGuards.js";
 
 // Shared secret so only our Apps Script can post here.
 export const INGEST_TOKEN = defineSecret("INGEST_TOKEN");
@@ -194,35 +195,42 @@ const isEmpty = (v: unknown): boolean =>
   v === "" ||
   (Array.isArray(v) && v.length === 0);
 
+// One recent-leads snapshot feeds both the identity dedup and the QA guards
+// on brand-new prospects (shared-phone and stale-re-send checks below).
+async function recentLeadsSnapshot(
+  db: ReturnType<typeof getFirestore>,
+): Promise<FirebaseFirestore.QuerySnapshot> {
+  return db
+    .collection("leads")
+    .orderBy("createdAt", "desc")
+    .limit(500)
+    .select(
+      "name", "phone", "altPhone", "email", "county", "tvcCaseNumber",
+      "deletedAt", "stage", "attachments", ...MERGEABLE_FIELDS,
+    )
+    .get();
+}
+
 // Last-resort dedup for referrals that arrive without a usable case number
 // (e.g. PDF-only emails whose extraction came back thin). Scans recent leads
 // and matches on phone, email, or name + county so a second copy of the same
 // person merges into the existing card instead of spawning a duplicate.
 // Returns the matched doc, or null when this is a genuinely new lead.
-async function findIdentityMatch(
-  db: ReturnType<typeof getFirestore>,
+function findIdentityMatch(
+  snap: FirebaseFirestore.QuerySnapshot,
   fields: Record<string, unknown>,
-): Promise<FirebaseFirestore.QueryDocumentSnapshot | null> {
+): FirebaseFirestore.QueryDocumentSnapshot | null {
   const phone = digitsOnly(fields.phone);
   const email = lower(fields.email);
   const county = countyKey(fields.county);
   const name = fields.name;
-
-  const snap = await db
-    .collection("leads")
-    .orderBy("createdAt", "desc")
-    .limit(500)
-    .select(
-      "name", "phone", "email", "county", "tvcCaseNumber",
-      "attachments", ...MERGEABLE_FIELDS,
-    )
-    .get();
 
   // Require a name match plus a corroborating signal (same phone, email, or
   // county). Name-only is too loose (common names); phone/email-only is unsafe
   // because trucking companies submit multiple drivers under one shared line.
   for (const doc of snap.docs) {
     const d = doc.data();
+    if (d.deletedAt) continue; // never merge a live referral into the trash
     if (!nameMatches(name, d.name)) continue;
     const samePhone = Boolean(phone) && digitsOnly(d.phone) === phone;
     const sameEmail = Boolean(email) && lower(d.email) === email;
@@ -230,6 +238,16 @@ async function findIdentityMatch(
     if (samePhone || sameEmail || sameCounty) return doc;
   }
   return null;
+}
+
+// The office's calendar day, for the stale-court-date check.
+function chicagoDayISO(ms: number): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
 }
 
 // Fills in any fields the existing card is missing from this newer copy, without
@@ -541,16 +559,17 @@ export const ingestEmail = onRequest(
     // Dedupe by TVC case number FIRST — before the name check — so a thin,
     // PDF-only re-send merges into the existing lead (contributing any new
     // attachments) instead of spawning a "Needs Review" card. Also rolls a
-    // changed court date into history as a continuance.
+    // changed court date into history as a continuance. Deleted (trashed)
+    // cards don't count — merging into the trash would swallow the referral.
     const caseNum = fields.tvcCaseNumber as string | undefined;
     if (caseNum) {
       const dupCase = await db
         .collection("leads")
         .where("tvcCaseNumber", "==", caseNum)
-        .limit(1)
+        .limit(5)
         .get();
-      if (!dupCase.empty) {
-        const existing = dupCase.docs[0];
+      const existing = dupCase.docs.find((doc) => !doc.data().deletedAt);
+      if (existing) {
         const ex = existing.data();
         // Fill any fields the existing card lacks and attach new PDFs.
         const filled = await mergeIntoExisting(existing, fields, body, { bump: true });
@@ -607,11 +626,99 @@ export const ingestEmail = onRequest(
 
     // Fallback identity dedup — for named referrals that arrived without a case
     // number. Match an existing card by phone/email/name+county and merge.
-    const match = await findIdentityMatch(db, fields);
+    const recent = await recentLeadsSnapshot(db);
+    const match = findIdentityMatch(recent, fields);
     if (match) {
       const filled = await mergeIntoExisting(match, fields, body, { bump: true });
       logger.info("Merged duplicate into existing lead", { id: match.id, filled });
       res.json({ ok: true, merged: true, filled, id: match.id });
+      return;
+    }
+
+    // --- QA guards on brand-new prospects (July 2026: "retained client ------
+    // chased as prospect"). A re-sent referral must never spawn a fresh,
+    // chase-able card:
+    //   (1) SHARED PHONE — a non-deleted lead already holds this phone number.
+    //       Name+phone matches merged above; what reaches here is phone-only
+    //       identity (name mismatch/missing), which a human must untangle —
+    //       trucking companies DO share one line across drivers, but the same
+    //       line can also be a retained client re-sent under a new spelling.
+    //   (2) STALE RE-SEND — the referral itself is old news: its court date
+    //       already passed, or its case number sits >20,000 below the newest
+    //       on file. TVC re-sending an old case is a "verify status" task,
+    //       not a fresh prospect.
+    // Both arrive flagged needs-review (the cadence sweep never chases
+    // unverified cards) with a post-it explaining what to check.
+    const phoneKey = phoneLast10(fields.phone);
+    const phoneDupe =
+      phoneKey.length === 10
+        ? recent.docs.find((doc) => {
+            const d = doc.data();
+            return (
+              !d.deletedAt &&
+              [d.phone, d.altPhone].some((p) => phoneLast10(p) === phoneKey)
+            );
+          })
+        : undefined;
+    const newestCaseNumber = recent.docs.reduce<number | null>((max, doc) => {
+      const d = doc.data();
+      if (d.deletedAt) return max;
+      const n = Number(String(d.tvcCaseNumber ?? "").trim());
+      return /^\d{6,8}$/.test(String(d.tvcCaseNumber ?? "").trim()) && (max === null || n > max)
+        ? n
+        : max;
+    }, null);
+    const staleReason = staleReferralReason({
+      nextCourtDate: fields.nextCourtDate,
+      caseNumber: fields.tvcCaseNumber,
+      newestCaseNumber,
+      todayISO: chicagoDayISO(Date.now()),
+    });
+    if (phoneDupe || staleReason) {
+      const id = await createLeadDoc(db, fields, body, text, {
+        name: rawName,
+        needsReview: true,
+      });
+      const dupe = phoneDupe?.data();
+      const why = phoneDupe
+        ? `shares a phone number (${String(fields.phone)}) with the existing lead ` +
+          `${dupe!.name}${dupe!.tvcCaseNumber ? ` (TVC #${dupe!.tvcCaseNumber})` : ""}, ` +
+          `currently in stage "${dupe!.stage}". If it's the same person, merge/update that ` +
+          `card instead of working this one; if they're different drivers on a shared ` +
+          `company line, clear the review flag.`
+        : `${staleReason}. Verify with TVC / the firm how this case stands before anyone ` +
+          `works it as a lead.`;
+      await db.collection("messages").add({
+        kind: "tvc_message",
+        source: "system",
+        from: "TVCHub Ingest",
+        fromName: "Ingest Guard",
+        subject: phoneDupe
+          ? `Possible duplicate lead — ${rawName}`
+          : `Old case re-sent by TVC — ${rawName}`,
+        message:
+          (phoneDupe
+            ? `A new referral for ${rawName} was NOT created as a workable prospect: it `
+            : `Old case re-sent by TVC — verify status before working as a lead. ` +
+              `A new referral for ${rawName} was created flagged for review because it `) + why,
+        tvcCaseNumber: (fields.tvcCaseNumber as string) ?? null,
+        memberName: rawName,
+        leadId: id,
+        phone: (fields.phone as string) ?? null,
+        email: (fields.email as string) ?? null,
+        gmailMessageId: body.messageId || null,
+        receivedAt: body.receivedAt || Date.now(),
+        handled: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      logger.warn("New prospect flagged by ingest guard", {
+        id,
+        guard: phoneDupe ? "shared_phone" : "stale_resend",
+        duplicateOf: phoneDupe?.id ?? null,
+        staleReason,
+      });
+      res.json({ ok: true, needsReview: true, id, guard: phoneDupe ? "shared_phone" : "stale_resend" });
       return;
     }
 
