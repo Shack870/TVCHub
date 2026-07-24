@@ -54,6 +54,7 @@ const DAY = 24 * HOUR;
 const HEARTBEATS: { fn: string; cadence: string; maxAgeMs: number }[] = [
   { fn: "syncCallRail", cadence: "every 5 minutes", maxAgeMs: 1 * HOUR },
   { fn: "syncEmail", cadence: "every 15 minutes", maxAgeMs: 2 * HOUR },
+  { fn: "tvcThreadSync", cadence: "every 15 minutes", maxAgeMs: 2 * HOUR },
   { fn: "syncSquare", cadence: "every 15 minutes", maxAgeMs: 2 * HOUR },
   { fn: "cadenceSweep", cadence: "daily at 7:00 AM", maxAgeMs: 26 * HOUR },
   { fn: "retryPdfHandoff", cadence: "hourly", maxAgeMs: 3 * HOUR },

@@ -2,8 +2,8 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { defineSecret } from "firebase-functions/params";
 import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
-import { createSign } from "node:crypto";
 import { stampHeartbeat } from "./heartbeat.js";
+import { delegatedGmailToken } from "./gmailAuth.js";
 
 // office@ Gmail → TVCHub email-activity sync.
 //
@@ -34,42 +34,9 @@ function addressesIn(header: string): string[] {
   return (header.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) ?? []).map(lc);
 }
 
-const b64url = (s: string | Buffer): string =>
-  Buffer.from(s).toString("base64url");
-
-// OAuth token for the delegated mailbox: sign a JWT with the SA private key
-// (sub = the mailbox we impersonate) and exchange it at Google's token
-// endpoint. Fails with unauthorized_client until DWD is granted in the
-// Admin Console.
-async function delegatedToken(keyJson: string): Promise<string> {
-  const key = JSON.parse(keyJson) as { client_email: string; private_key: string };
-  const now = Math.floor(Date.now() / 1000);
-  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claims = b64url(
-    JSON.stringify({
-      iss: key.client_email,
-      sub: MAILBOX,
-      scope: "https://www.googleapis.com/auth/gmail.readonly",
-      aud: "https://oauth2.googleapis.com/token",
-      iat: now,
-      exp: now + 3600,
-    }),
-  );
-  const signer = createSign("RSA-SHA256");
-  signer.update(`${header}.${claims}`);
-  const jwt = `${header}.${claims}.${signer.sign(key.private_key, "base64url")}`;
-
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${jwt}`,
-  });
-  const json = (await res.json()) as { access_token?: string; error?: string; error_description?: string };
-  if (!res.ok || !json.access_token) {
-    throw new Error(`Gmail delegation failed: ${json.error} ${json.error_description ?? ""}`.trim());
-  }
-  return json.access_token;
-}
+// OAuth token for the delegated mailbox lives in gmailAuth.ts (shared with
+// the TVC-thread sync). Fails with unauthorized_client until DWD is granted
+// in the Admin Console.
 
 interface GmailMessageMeta {
   id: string;
@@ -107,7 +74,7 @@ export const syncEmail = onSchedule(
     const db = getFirestore();
     let token: string;
     try {
-      token = await delegatedToken(GMAIL_SA_KEY.value());
+      token = await delegatedGmailToken(GMAIL_SA_KEY.value(), MAILBOX);
     } catch (e) {
       // Expected until domain-wide delegation is authorized in Admin Console.
       logger.warn(String(e));

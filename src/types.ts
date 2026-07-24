@@ -49,6 +49,9 @@ export interface ContactAttempt {
   via?: 'callrail' | 'email' | 'square';
   callId?: string;
   paymentId?: string; // Square payment id (via 'square')
+  // Gmail message id (via 'email') — the TVC-thread sync's idempotency key
+  // for timeline entries (functions/src/tvcthreads.ts).
+  gmailMessageId?: string | null;
   recordingUrl?: string | null;
   durationSec?: number | null;
   // Transcript analysis (advisory only — never drives stage changes).

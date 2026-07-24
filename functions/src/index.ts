@@ -18,6 +18,7 @@ export { ingestEmail } from "./ingest.js";
 export { extractPdf } from "./extract.js";
 export { syncCallRail } from "./callrail.js";
 export { syncEmail } from "./emailsync.js";
+export { tvcThreadSync } from "./tvcthreads.js";
 export { syncSquare } from "./squaresync.js";
 export { cadenceSweep } from "./cadence.js";
 export { sendToPdfApp, autoSendToPdfApp, retryPdfHandoff } from "./pdfhandoff.js";
