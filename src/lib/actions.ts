@@ -157,9 +157,12 @@ export async function markLost(lead: Lead, by?: string, reason?: string): Promis
   await applyOutcome(lead, 'lost', { notes: reason ?? 'Marked lost', by });
 }
 
-// Bring a lost lead back into the working pipeline.
+// Bring a lost lead back into the working pipeline. lostRevivedAt is the
+// safety valve for the classifier's hard-decline auto-route (see
+// functions/src/noSaleRouting.ts): once a human has pulled a lead out of
+// lost, no call — old or new — may ever auto-re-lose it.
 export async function reviveLost(lead: Lead): Promise<void> {
-  await updateLead(lead.id, { stage: 'callback', lostAt: null });
+  await updateLead(lead.id, { stage: 'callback', lostAt: null, lostRevivedAt: Date.now() });
 }
 
 // --- Ownership ---

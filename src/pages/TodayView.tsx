@@ -83,9 +83,15 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
       if (isSalePending(l)) {
         const promisedAt = l.salePromisedAt ?? l.saleStatusAt ?? null;
         const since = promisedAt ? agingLabel(now - promisedAt) : null;
+        const inv = l.squareInvoice;
         const bits = [
           l.saleAmount ? `${fmtMoney(l.saleAmount)} promised` : 'Payment promised',
           since ? `${since} ago` : null,
+          // An active unpaid invoice means the ask is "pay the invoice in
+          // your inbox", not "let me take a card" — surface it on the row.
+          inv?.status === 'UNPAID'
+            ? `invoice ${inv.number ? `#${inv.number} ` : ''}out — ${fmtMoney(inv.amountCents / 100)}`
+            : null,
           l.nextCourtDate ? `court ${l.nextCourtDate}` : null,
         ].filter(Boolean);
         moneyOnTable.push({ lead: l, why: `Said yes — ${bits.join(' · ')}` });
@@ -257,6 +263,10 @@ export function TodayView({ embedded = false }: { embedded?: boolean }) {
 // The gold section: verbal yeses whose money was never collected. Rendered
 // with its own treatment (not the generic Section) so the promised total and
 // the "already sold" framing stand apart from ordinary follow-up work.
+// Split by whether a Square invoice is already out (an active UNPAID
+// squareInvoice stamp, written by syncSquare's invoice pass): "no invoice
+// sent" needs an invoice or a card over the phone; "invoice out" needs a
+// nudge to pay the thing that's already sitting in their inbox.
 function MoneyOnTableSection({
   tasks,
   promisedTotal,
@@ -267,6 +277,8 @@ function MoneyOnTableSection({
   onOpen: (id: string) => void;
 }) {
   if (tasks.length === 0) return null;
+  const invoiceOut = tasks.filter((t) => t.lead.squareInvoice?.status === 'UNPAID');
+  const noInvoice = tasks.filter((t) => t.lead.squareInvoice?.status !== 'UNPAID');
   return (
     <section className="rounded-2xl bg-gradient-to-r from-amber-500/15 via-amber-400/10 to-amber-500/15 p-4 ring-2 ring-amber-400/50">
       <div className="mb-3 flex items-center justify-between">
@@ -287,11 +299,32 @@ function MoneyOnTableSection({
           </Badge>
         </div>
       </div>
-      <ul className="space-y-2">
-        {tasks.map((t) => (
-          <Row key={t.lead.id} task={t} onOpen={onOpen} />
-        ))}
-      </ul>
+      {noInvoice.length > 0 && (
+        <div className="mb-2">
+          {invoiceOut.length > 0 && (
+            <p className="mb-1.5 font-type text-[11px] font-bold uppercase tracking-wider text-amber-200/80">
+              No invoice sent — get one out or run the card
+            </p>
+          )}
+          <ul className="space-y-2">
+            {noInvoice.map((t) => (
+              <Row key={t.lead.id} task={t} onOpen={onOpen} />
+            ))}
+          </ul>
+        </div>
+      )}
+      {invoiceOut.length > 0 && (
+        <div>
+          <p className="mb-1.5 font-type text-[11px] font-bold uppercase tracking-wider text-amber-200/80">
+            Invoice out, awaiting payment — nudge them to pay it
+          </p>
+          <ul className="space-y-2">
+            {invoiceOut.map((t) => (
+              <Row key={t.lead.id + ':inv'} task={t} onOpen={onOpen} />
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   );
 }

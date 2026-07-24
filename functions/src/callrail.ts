@@ -4,6 +4,8 @@ import { logger } from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
 import { randomUUID } from "node:crypto";
 import { stampHeartbeat } from "./heartbeat.js";
+import { correctNameInText, nameVerdict } from "./nameMatch.js";
+import { hardDeclineMove } from "./noSaleRouting.js";
 
 // CallRail → TVCHub phone-activity sync.
 //
@@ -23,6 +25,12 @@ import { stampHeartbeat } from "./heartbeat.js";
 //      attempt (call or synced email) on a lead still in 'new' means it is no
 //      longer untouched. ONLY that promotion — no other stage is ever touched,
 //      and nothing is ever downgraded.
+//   3. A HARD decline on the transcript ("already paid the ticket myself",
+//      "hired another lawyer", explicit final refusal) routes an unsold board
+//      lead to 'lost' (the No Sale view) — see noSaleRouting.ts for the
+//      guards (never a paying client, never a lead a human revived out of
+//      lost, never on a call older than the lost stamp). Soft declines
+//      (price, thinking, wants evidence) stay on the board.
 // Human-set retained/financed/intake_complete/lost stages are never overridden.
 
 const CALLRAIL_API_KEY = defineSecret("CALLRAIL_API_KEY");
@@ -68,6 +76,18 @@ export interface CallAnalysis {
   // happened outside the app's view — pause the sales cadence and ask a human
   // (the July QA's "retained client chased as prospect" failure).
   existingClientInquiry: boolean;
+  // Decline classification. HARD = final and unambiguous (already paid the
+  // ticket themselves, hired another lawyer, case already resolved, explicit
+  // final refusal) — drives the No Sale auto-route (noSaleRouting.ts). SOFT =
+  // could still turn (price objection, wants to think, wants evidence) and
+  // never moves a lead.
+  declineType: "none" | "soft" | "hard";
+  declineReason: string | null; // short factual why, for hard/soft declines
+  // The caller's name as heard on the call. When the call is tied to a known
+  // lead the prompt carries the lead's legal spelling, and the sync
+  // reconciles mishearings back to it (nameMatch.ts) — a heard name that
+  // clearly names a DIFFERENT person is kept as-is (wrong-person signal).
+  callerName: string | null;
 }
 
 export const ANALYSIS_SYSTEM = `You analyze a phone call transcript between a law firm (Agent) and a traffic-case lead (Caller). The firm's funnel is: reach the lead ("connect"), pitch representation, then the lead buys, declines, or thinks about it.
@@ -85,6 +105,9 @@ Return ONLY a JSON object:
 - "paymentPromise": for promised_unpaid only — a short quote of what they committed to ("will pay Friday after payday"), else null.
 - "nonPaymentReason": for promised_unpaid only — 1-2 sentences explaining WHY money did not change hands on this call. If the caller gave a reason, state it ("Gets paid Friday and will call back then", "Needs to check with his boss who covers company tickets"). If the AGENT never asked for payment or never attempted to run a card, say that explicitly ("The agent never asked for payment on this call — the yes was left hanging with no collection attempt"). null when not promised_unpaid.
 - "existingClientInquiry": true ONLY when the caller speaks as an already-hired client checking on a case the firm is ALREADY handling (asking for a status update, court outcome, paperwork, or next steps on their existing case) rather than a prospect being pitched or shopping for representation. false when in doubt.
+- "declineType": "hard" ONLY when the caller gave a FINAL, unambiguous no to representation: they already paid/resolved the ticket themselves, already hired another lawyer, the case is already resolved/dismissed, or they explicitly and finally refused ("not interested, stop calling"). A hard decline can appear even without a formal pitch (e.g. the caller opens with "I already paid that ticket myself"). "soft" when the decline could still turn: price objection, wants to think about it, wants to see evidence/paperwork first, needs to check with someone. A price/affordability objection alone is NEVER hard, even when the caller sounds final — it only becomes hard when they also state they are done with the matter (paying/paid the ticket themselves, letting it go, hired someone else). "none" when no decline happened on this call. When in doubt between hard and soft, use "soft".
+- "declineReason": for declineType hard/soft — a short factual phrase of why ("already paid the citation himself", "hired another attorney", "thinks the fee is too high"), else null.
+- "callerName": the caller's name as stated or heard on this call (full name if given), else null. If our records name a likely caller and the person on the call plausibly is them, use EXACTLY that spelling; if they are clearly a different person, report the name you actually hear.
 Do not invent facts. If the transcript is empty or useless, use connection "unclear", empty summary.`;
 
 async function analyzeTranscript(
@@ -92,8 +115,15 @@ async function analyzeTranscript(
   direction: string,
   startTime: string,
   apiKey: string,
+  // Legal name from the lead the call is tied to — the referral's exact
+  // spelling. Feeding it in fixes heard names at the source (the AI mishears
+  // roughly half of them otherwise).
+  leadName?: string | null,
 ): Promise<CallAnalysis | null> {
   try {
+    const leadHint = leadName
+      ? `\nOur records say the caller is likely ${leadName} (exact legal spelling from the court referral). If the person on this call plausibly is them, use exactly that spelling for their name; if they are clearly someone else, report the name you actually hear.`
+      : "";
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -105,7 +135,7 @@ async function analyzeTranscript(
           { role: "system", content: ANALYSIS_SYSTEM },
           {
             role: "user",
-            content: `Call direction: ${direction}. Call date: ${startTime}.\n\nTranscript:\n${transcript.slice(0, 24000)}`,
+            content: `Call direction: ${direction}. Call date: ${startTime}.${leadHint}\n\nTranscript:\n${transcript.slice(0, 24000)}`,
           },
         ],
       }),
@@ -135,6 +165,9 @@ async function analyzeTranscript(
       paymentPromise: parsed.paymentPromise ? String(parsed.paymentPromise) : null,
       nonPaymentReason: parsed.nonPaymentReason ? String(parsed.nonPaymentReason) : null,
       existingClientInquiry: Boolean(parsed.existingClientInquiry),
+      declineType: ["hard", "soft"].includes(parsed.declineType) ? parsed.declineType : "none",
+      declineReason: parsed.declineReason ? String(parsed.declineReason) : null,
+      callerName: parsed.callerName ? String(parsed.callerName) : null,
     };
   } catch (e) {
     logger.warn("Transcript analysis failed; falling back to basic logging", e);
@@ -277,7 +310,9 @@ async function fetchRecentCalls(apiKey: string): Promise<CrCall[]> {
 export async function ensureFollowUp(
   db: ReturnType<typeof getFirestore>,
   leadId: string,
-  opts: { dueAt: number; note: string; withinMs: number; type?: string },
+  // allowLost: the cadence's lost-lead court reminders (the No Sale
+  // resurrection path) are the ONE follow-up kind allowed onto a lost lead.
+  opts: { dueAt: number; note: string; withinMs: number; type?: string; allowLost?: boolean },
 ): Promise<boolean> {
   let added = false;
   await db.runTransaction(async (tx) => {
@@ -286,7 +321,10 @@ export async function ensureFollowUp(
     if (!snap.exists) return;
     const d = snap.data()!;
     // Don't chase decided leads.
-    if (["retained", "financed", "intake_complete", "lost"].includes(d.stage) || d.deletedAt) return;
+    const blockedStages = opts.allowLost
+      ? ["retained", "financed", "intake_complete"]
+      : ["retained", "financed", "intake_complete", "lost"];
+    if (blockedStages.includes(d.stage) || d.deletedAt) return;
     const followUps = Array.isArray(d.followUps) ? d.followUps : [];
     const dupe = followUps.some(
       (f: { done?: boolean; dueAt?: number }) =>
@@ -495,8 +533,25 @@ export const syncCallRail = onSchedule(
               call.direction,
               call.start_time,
               OPENAI_API_KEY_CR.value(),
+              lead.name,
             )
           : null;
+
+      // Heard-name reconciliation (belt and braces on top of the prompt
+      // hint): a heard name that fuzzy-matches the lead's legal name gets the
+      // legal spelling; a clearly DIFFERENT name is kept — wrong-person calls
+      // are signal. The summary gets the same spelling fix.
+      if (analysis) {
+        if (
+          analysis.callerName &&
+          nameVerdict(analysis.callerName, lead.name) === "match" &&
+          analysis.callerName !== lead.name
+        ) {
+          analysis.callerName = lead.name;
+        }
+        const fixedSummary = correctNameInText(analysis.summary, lead.name);
+        if (fixedSummary) analysis.summary = fixedSummary;
+      }
 
       // Outcome: prefer the transcript's read of the call over the raw
       // answered/voicemail flags, using the SAME outcome values as the manual
@@ -536,8 +591,12 @@ export const syncCallRail = onSchedule(
         // board (the one sanctioned auto-move) — the audit note lands on both
         // the lead and this attempt's timeline entry.
         const move = analysis ? autoStageMove(d, analysis, startedAt) : null;
-        const attemptFinal = move
-          ? { ...attempt, notes: `${attempt.notes} → ${move.note}.` }
+        // HARD decline routes an unsold board lead to No Sale — but a
+        // confirmed-payment move always wins if both somehow fire on one call.
+        const lostMove = !move && analysis ? hardDeclineMove(d, analysis, startedAt) : null;
+        const applied = move ?? lostMove;
+        const attemptFinal = applied
+          ? { ...attempt, notes: `${attempt.notes} → ${applied.note}.` }
           : attempt;
         const patch: Record<string, unknown> = {
           contactAttempts: [...attempts, attemptFinal],
@@ -571,6 +630,9 @@ export const syncCallRail = onSchedule(
         if (move) {
           Object.assign(patch, move.patch);
           movedTo = move.patch.stage as string;
+        } else if (lostMove) {
+          Object.assign(patch, lostMove.patch);
+          movedTo = "lost";
         } else if (d.stage === "new") {
           // First contact activity: the lead is no longer untouched, so it
           // leaves Initial Leads for the pipeline. Only new -> callback — a
@@ -584,6 +646,13 @@ export const syncCallRail = onSchedule(
         logger.info("Promoted new lead to callback on first contact activity", {
           leadId: lead.id,
           name: lead.name,
+          callId: call.id,
+        });
+      } else if (movedTo === "lost") {
+        logger.info("Auto-routed hard decline to No Sale", {
+          leadId: lead.id,
+          name: lead.name,
+          reason: analysis?.declineReason ?? null,
           callId: call.id,
         });
       } else if (movedTo) {

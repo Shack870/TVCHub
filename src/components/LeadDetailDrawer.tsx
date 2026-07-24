@@ -7,7 +7,7 @@ import { ConfirmDialog } from './ui/ConfirmDialog';
 import { useUI } from '../store/useUI';
 import { useLead } from '../store/useLeads';
 import { useAuth } from '../context/AuthContext';
-import type { ContactOutcome, Lead, Ticket } from '../types';
+import type { ContactOutcome, Lead, SquareInvoiceStamp, Ticket } from '../types';
 import { formatDistanceToNow } from 'date-fns';
 import { isActiveLead, isContactOverdue, isSalePending, OUTCOME_LABELS, showsMotionsDeadline, STAGE_LABELS } from '../lib/leadFlow';
 import { outstandingOf } from '../lib/paymentLedger';
@@ -210,6 +210,11 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
           onRetain={() => setRetainOpen(true)}
         />
       )}
+
+      {/* Square invoice status — stamped by syncSquare's invoice pass. Sits
+          with the payment/Mark Paid treatment: an UNPAID invoice is the
+          "invoice out, awaiting payment" half of money-on-the-table. */}
+      {lead.squareInvoice && <InvoiceStatusLine inv={lead.squareInvoice} />}
 
       {/* Top tabs */}
       <div className="flex gap-1 px-4">
@@ -1652,6 +1657,46 @@ function SalePendingBanner({
           Log Billing Call
         </button>
       </div>
+    </div>
+  );
+}
+
+// Square invoice status line (stamp written by syncSquare's invoice pass).
+// Color tracks the status: unpaid = amber (chase it), partially paid = blue,
+// paid = green, canceled/refunded/failed = gray strike-through territory.
+function InvoiceStatusLine({ inv }: { inv: SquareInvoiceStamp }) {
+  const tone =
+    inv.status === 'UNPAID'
+      ? 'border-amber-500/60 bg-amber-400/15 text-amber-200'
+      : inv.status === 'PAID'
+        ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200'
+        : inv.status === 'PARTIALLY_PAID' || inv.status === 'PAYMENT_PENDING'
+          ? 'border-sky-500/50 bg-sky-500/10 text-sky-200'
+          : 'border-white/20 bg-white/5 text-manila/70';
+  const sent = new Date(inv.sentAt).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'America/Chicago',
+  });
+  return (
+    <div
+      className={`mx-4 mb-2 flex flex-wrap items-center gap-2 rounded-lg border px-4 py-2 font-type text-sm ${tone}`}
+    >
+      <span>
+        🧾 Invoice {inv.number ? `#${inv.number}` : ''} · {fmtMoney(inv.amountCents / 100)} · sent{' '}
+        {sent} ·{' '}
+        <span className="font-black tracking-wide">{inv.status.replace(/_/g, ' ')}</span>
+      </span>
+      {inv.publicUrl && (
+        <a
+          href={inv.publicUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="underline opacity-80 hover:opacity-100"
+        >
+          view invoice ↗
+        </a>
+      )}
     </div>
   );
 }

@@ -27,6 +27,12 @@ import { stampHeartbeat } from "./heartbeat.js";
 //      (the continuance pitch: they don't want to travel — we can file the
 //      Motion to Continue). If the court date passes with no decision, a
 //      post-it asks for the write-off call.
+//   4. NO SALE RESURRECTION — 'lost' leads with a FUTURE court date keep the
+//      free week-before / day-before court reminders (a separate pass; lost
+//      is not an active stage). That call is the resurrection path: free
+//      value to someone who said no, right when the problem gets real again.
+//      Lost leads get NOTHING else — no chase, no nudge, no motions
+//      heads-up (the sales window is closed by definition).
 //   0. BILLING (hottest track, runs before the others) — a lead who said YES
 //      on a call but didn't pay (saleStatus promised_unpaid) gets a same-day
 //      collect-payment follow-up, then one every 2 days. After 3 collection
@@ -562,6 +568,61 @@ export const cadenceSweep = onSchedule(
       }
     }
 
+    // --- 4. NO SALE RESURRECTION: court reminders for lost leads ------------
+    // Hard declines (auto-routed by the classifier or hand-marked) leave the
+    // board, but their court date is still coming. The free week-before /
+    // day-before reminder calls keep running for lost leads — free value at
+    // the exact moment the ticket gets real again is the one honest re-open
+    // we have. ensureFollowUp's allowLost flag opens the one door; the
+    // chase/nudge/billing passes above never see lost leads at all
+    // (ACTIVE_STAGES excludes 'lost').
+    let lostReminders = 0;
+    const lostSnap = await db.collection("leads").where("stage", "==", "lost").get();
+    for (const doc of lostSnap.docs) {
+      const d = doc.data();
+      if (d.deletedAt) continue;
+      const courtDate =
+        typeof d.nextCourtDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.nextCourtDate)
+          ? (d.nextCourtDate as string)
+          : null;
+      const courtMs = courtDate ? new Date(`${courtDate}T09:00:00-05:00`).getTime() : null;
+      if (courtMs === null || courtMs <= now) continue;
+      const followUps: { done?: boolean; dueAt?: number; type?: string }[] = Array.isArray(
+        d.followUps,
+      )
+        ? d.followUps
+        : [];
+      const targets = [
+        {
+          type: "week_before",
+          dueAt: courtMs - 7 * DAY,
+          note: "Free court reminder — 1 week out (No Sale resurrection touch: they said no, but court is coming — free value, and the door back in)",
+        },
+        {
+          type: "day_before",
+          dueAt: courtMs - DAY,
+          note: "Free court reminder — court is tomorrow (No Sale resurrection touch)",
+        },
+      ];
+      for (const t of targets) {
+        if (t.dueAt < now - DAY) continue; // window already passed
+        // Same proximity dedupe as the active-lead reminders: a reminder of
+        // this type near the target — open or already completed — counts.
+        const exists = followUps.some(
+          (f) => f.type === t.type && Math.abs((f.dueAt ?? 0) - t.dueAt) < 3 * DAY,
+        );
+        if (exists) continue;
+        const added = await ensureFollowUp(db, doc.id, {
+          dueAt: Math.max(t.dueAt, now),
+          note: t.note,
+          withinMs: 6 * 3600_000,
+          type: t.type,
+          allowLost: true,
+        });
+        if (added) lostReminders++;
+      }
+    }
+
     // --- RECEIVABLES: stalled financed payment plans ------------------------
     // A financed case is supposed to keep producing Square payments. When the
     // newest one is PLAN_STALL_DAYS+ old (or none ever landed and the case has
@@ -634,6 +695,7 @@ export const cadenceSweep = onSchedule(
       chaseCallbacks: chased,
       undecidedNudges: nudged,
       courtReminders: reminders,
+      lostLeadCourtReminders: lostReminders,
       decisionPostIts: flagged,
       stalledPlanPostIts: stalledPlans,
     });

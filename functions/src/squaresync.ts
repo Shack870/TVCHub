@@ -30,6 +30,13 @@ import { stampHeartbeat } from "./heartbeat.js";
 // but where no Square charge ever matched get a billing-escalation post-it —
 // "the call says paid, the processor says nothing".
 //
+// An INVOICE pass follows: the office retains by Square invoice too
+// ("Retainer Agreement - <name>", emailed). Each invoice's status is stamped
+// onto its lead (squareInvoice) and unpaid invoices are chased with an
+// Action Item post-it — see the pass itself for the full rules. The invoice
+// pass NEVER credits money; the payment matcher above stays the one source
+// of truth for dollars.
+//
 // Mirrors the CallRail/Email syncs' safety rules: marker docs
 // (squarePayments/{paymentId}) make re-runs harmless, deleted leads are never
 // touched, and a paid_full lead is never downgraded. Business dates come from
@@ -86,6 +93,59 @@ interface SqCustomer {
   email_address?: string;
   phone_number?: string;
 }
+
+// --- Square INVOICES -----------------------------------------------------
+// The office sends Square invoices for retainers ("Retainer Agreement -
+// <name>", delivery EMAIL). The invoice pass below tracks their status onto
+// leads and chases unpaid ones. Money itself stays the payments API's job —
+// an invoice payment shows up there too, and the payment matcher is the one
+// source of truth for crediting dollars.
+
+interface SqInvoiceRecipient {
+  given_name?: string;
+  family_name?: string;
+  email_address?: string;
+  phone_number?: string;
+}
+
+interface SqInvoice {
+  id: string;
+  invoice_number?: string;
+  title?: string;
+  // DRAFT | UNPAID | SCHEDULED | PARTIALLY_PAID | PAID | PARTIALLY_REFUNDED |
+  // REFUNDED | CANCELED | FAILED | PAYMENT_PENDING
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  public_url?: string;
+  order_id?: string; // the paid order — corroborates payment matching
+  primary_recipient?: SqInvoiceRecipient;
+  payment_requests?: { computed_amount_money?: SqMoney }[];
+}
+
+async function fetchInvoices(token: string): Promise<SqInvoice[]> {
+  // Full list every run (the ListInvoices API has no updated-since filter and
+  // the location carries a dozen or so). Marker docs keyed on status make the
+  // re-walk cheap: an invoice is only re-processed when its status CHANGES.
+  const invoices: SqInvoice[] = [];
+  let cursor = "";
+  do {
+    const url =
+      `${SQUARE}/invoices?location_id=${LOCATION_ID}&limit=100` +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+    const res = await fetch(url, { headers: sqHeaders(token) });
+    if (!res.ok) throw new Error(`Square invoices ${res.status}: ${await res.text()}`);
+    const json = (await res.json()) as { invoices?: SqInvoice[]; cursor?: string };
+    invoices.push(...(json.invoices ?? []));
+    cursor = json.cursor ?? "";
+  } while (cursor);
+  return invoices;
+}
+
+// UNPAID this long after being sent = chase it with a post-it.
+const INVOICE_CHASE_AFTER_DAYS = 3;
+// Terminal statuses that stand an invoice-chase post-it down.
+const INVOICE_SETTLED_STATUSES = ["PAID", "REFUNDED", "PARTIALLY_REFUNDED", "CANCELED"];
 
 function sqHeaders(token: string): Record<string, string> {
   return {
@@ -834,7 +894,215 @@ export const syncSquare = onSchedule(
       });
     }
 
-    await stateRef.set({ lastSyncAt: Date.now(), backfillStartAt }, { merge: true });
+    // --- Invoice tracking pass ----------------------------------------------
+    // The office also RETAINS by Square invoice ("Retainer Agreement -
+    // <name>", emailed). This pass stamps each invoice's status onto its lead
+    // (squareInvoice field) and chases unpaid ones. Rules:
+    //   - Match by recipient email → phone last-10 → name (recipient
+    //     given+family, or the name inside the invoice TITLE via the same
+    //     normalized needles the payment-note matcher uses).
+    //   - PAID / PARTIALLY_PAID: the payments API already recorded the actual
+    //     money and the payment matcher credited it — the invoice pass only
+    //     updates the status stamp, NEVER the sale fields (no double-credit).
+    //   - UNPAID for 3+ days since sent: one Action Item post-it per invoice,
+    //     ever (deduped by squareInvoiceId, same pattern as squarePaymentId).
+    //     Raised even when NO lead matches — an unpaid retainer invoice is
+    //     money on the table whoever the recipient is, so the post-it names
+    //     the recipient instead.
+    //   - CANCELED / REFUNDED: status stamp updated (the UI treats only
+    //     UNPAID as active), open chase post-its stood down, no new post-it.
+    // Marker docs squareInvoices/{invoiceId} store the last-seen status, so
+    // an invoice is re-processed exactly when its status CHANGES. First run
+    // sweeps every invoice on the location (the backfill).
+    let invoicesSeen = 0;
+    let invoicesMatched = 0;
+    let invoicePostIts = 0;
+    const invoices = await fetchInvoices(token);
+    for (const inv of invoices) {
+      const status = inv.status ?? "UNKNOWN";
+      if (status === "DRAFT") continue; // never sent — nothing to track yet
+      const marker = db.collection("squareInvoices").doc(inv.id);
+      const markerSnap = await marker.get();
+      if (markerSnap.exists && markerSnap.data()?.status === status) continue;
+      invoicesSeen++;
+
+      const r = inv.primary_recipient ?? {};
+      const recipientName =
+        [r.given_name, r.family_name].filter(Boolean).join(" ").trim() || null;
+      const cents = inv.payment_requests?.[0]?.computed_amount_money?.amount ?? 0;
+      const amountLabel = fmtDollars(cents);
+      const sentAt = new Date(inv.created_at ?? "").getTime() || now;
+      const invUpdatedAt = new Date(inv.updated_at ?? "").getTime() || now;
+      const sentDay = new Date(sentAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        timeZone: "America/Chicago",
+      });
+
+      // Match to a lead: email → phone → exact-unique name → name inside the
+      // title/recipient text (the payment-note needle index).
+      let lead: LeadRef | undefined;
+      let matchedBy: string | null = null;
+      if (r.email_address) {
+        lead = byEmail.get(lc(r.email_address));
+        if (lead) matchedBy = "email";
+      }
+      if (!lead) {
+        const phoneKey = last10(r.phone_number);
+        if (phoneKey.length === 10) {
+          lead = byPhone.get(phoneKey);
+          if (lead) matchedBy = "phone";
+        }
+      }
+      if (!lead && recipientName) {
+        const hits = byName.get(lc(recipientName));
+        if (hits && hits.length === 1) {
+          lead = hits[0];
+          matchedBy = "name";
+        }
+      }
+      if (!lead) {
+        // "Retainer Agreement - Anastacia Barnes" carries the CLIENT's name
+        // even when the recipient is someone else paying on their behalf.
+        const hay = ` ${normalizeText(inv.title)} ${normalizeText(recipientName)} `;
+        const hits = new Map<string, LeadRef>();
+        for (const entry of noteNameIndex) {
+          if (entry.needles.some((n) => hay.includes(` ${n} `))) {
+            hits.set(entry.lead.id, entry.lead);
+          }
+        }
+        if (hits.size === 1) {
+          lead = [...hits.values()][0];
+          matchedBy = "title";
+        }
+      }
+
+      // Stamp the lead. The stamp is pure status telemetry — sale/money
+      // fields stay the payment matcher's job (invoice payments land there
+      // too; inv.order_id is kept on the marker to corroborate if needed).
+      if (lead) {
+        await db.runTransaction(async (tx) => {
+          const ref = db.collection("leads").doc(lead!.id);
+          const snap = await tx.get(ref);
+          if (!snap.exists) return;
+          const d = snap.data()!;
+          if (d.deletedAt) return;
+          const prev = d.squareInvoice as { id?: string; updatedAt?: number } | undefined;
+          // Newest-updated invoice owns the stamp — a stale sibling invoice
+          // can't overwrite a fresher one.
+          if (prev && prev.id !== inv.id && (prev.updatedAt ?? 0) > invUpdatedAt) return;
+          tx.update(ref, {
+            squareInvoice: {
+              id: inv.id,
+              number: inv.invoice_number ?? null,
+              amountCents: cents,
+              status,
+              sentAt,
+              publicUrl: inv.public_url ?? null,
+              updatedAt: invUpdatedAt,
+            },
+            updatedAt: Date.now(),
+          });
+        });
+        invoicesMatched++;
+      }
+
+      // Chase: sent, still unpaid, given a grace window. One post-it per
+      // invoice, ever — matched by squareInvoiceId (the squarePaymentId
+      // dedupe pattern). Unmatched recipients get chased too, by name.
+      if (status === "UNPAID" && now - sentAt >= INVOICE_CHASE_AFTER_DAYS * 86400_000) {
+        const alreadyPosted = !(
+          await db
+            .collection("messages")
+            .where("squareInvoiceId", "==", inv.id)
+            .limit(1)
+            .get()
+        ).empty;
+        if (!alreadyPosted) {
+          const who = lead?.name ?? recipientName ?? "unknown recipient";
+          await db.collection("messages").add({
+            kind: "tvc_message",
+            source: "system",
+            from: "Square Sync",
+            fromName: "Square Sync",
+            subject: `Invoice out, unpaid — ${who}, ${amountLabel}, sent ${sentDay} — chase`,
+            message:
+              `Square invoice ${inv.invoice_number ? `#${inv.invoice_number}` : inv.id} for ` +
+              `${amountLabel} was sent to ${recipientName ?? "an unnamed recipient"}` +
+              `${r.email_address ? ` (${r.email_address})` : ""} on ${sentDay} and is still UNPAID.` +
+              (lead
+                ? `\nMatched to lead ${lead.name} (by ${matchedBy}).`
+                : `\nNo lead in the app matches this recipient — it may predate the app or ` +
+                  `belong to the firm's other work, but an unpaid retainer invoice is money ` +
+                  `on the table either way.`) +
+              `\nChase it: call/email them, or cancel the invoice if it's dead.` +
+              (inv.public_url ? `\nInvoice: ${inv.public_url}` : ""),
+            tvcCaseNumber: null,
+            memberName: lead?.name ?? recipientName,
+            leadId: lead?.id ?? null,
+            phone: r.phone_number ?? null,
+            email: r.email_address ?? null,
+            gmailMessageId: null,
+            squareInvoiceId: inv.id,
+            receivedAt: sentAt,
+            handled: false,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+          invoicePostIts++;
+        }
+      }
+
+      // Settled/dead invoices stand their chase post-it down automatically.
+      if (INVOICE_SETTLED_STATUSES.includes(status)) {
+        const open = await db
+          .collection("messages")
+          .where("squareInvoiceId", "==", inv.id)
+          .where("handled", "==", false)
+          .get();
+        for (const m of open.docs) {
+          if (m.data().deletedAt) continue;
+          await m.ref.update({
+            handled: true,
+            handledAt: invUpdatedAt,
+            handledBy: "Square sync",
+            updatedAt: Date.now(),
+          });
+        }
+      }
+
+      await marker.set(
+        {
+          processedAt: Date.now(),
+          status,
+          leadId: lead?.id ?? null,
+          matchedBy,
+          amountCents: cents,
+          invoiceNumber: inv.invoice_number ?? null,
+          orderId: inv.order_id ?? null,
+          recipientName,
+          recipientEmail: r.email_address ?? null,
+          recipientPhone: r.phone_number ?? null,
+          sentAt,
+          invoiceUpdatedAt: invUpdatedAt,
+        },
+        { merge: true },
+      );
+      logger.info("Square invoice processed", {
+        invoiceId: inv.id,
+        number: inv.invoice_number ?? null,
+        status,
+        amount: amountLabel,
+        leadId: lead?.id ?? null,
+        matchedBy,
+        recipient: recipientName,
+      });
+    }
+
+    await stateRef.set(
+      { lastSyncAt: Date.now(), backfillStartAt, invoicesLastSyncAt: Date.now() },
+      { merge: true },
+    );
     logger.info("Square sync complete", {
       pulled: payments.length,
       completed: completed.length,
@@ -843,6 +1111,9 @@ export const syncSquare = onSchedule(
       ambiguityPostIts,
       escalationsCleared,
       verifyFlagged,
+      invoicesProcessed: invoicesSeen,
+      invoicesMatched,
+      invoicePostIts,
     });
     await stampHeartbeat("syncSquare");
   },

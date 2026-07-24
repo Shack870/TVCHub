@@ -67,7 +67,32 @@ export interface ContactAttempt {
     paymentPlan?: 'full' | 'financed' | 'unknown';
     paymentPromise?: string | null;
     nonPaymentReason?: string | null;
+    // Decline classification (see functions/src/callrail.ts). 'hard' drives
+    // the No Sale auto-route; 'soft' never moves a lead.
+    declineType?: 'none' | 'soft' | 'hard';
+    declineReason?: string | null;
+    // Caller's name as heard, reconciled to the lead's legal spelling when it
+    // fuzzy-matches (functions/src/nameMatch.ts); a clearly different name is
+    // kept as-is — wrong-person calls are signal.
+    callerName?: string | null;
   };
+}
+
+// Square invoice status stamped onto a lead by the invoice pass in
+// functions/src/squaresync.ts. Pure status telemetry — money always comes
+// from the payment matcher (squarePaidTotal / via-'square' attempts), never
+// from here. status UNPAID is the "invoice out, awaiting payment" state the
+// Today view splits on.
+export interface SquareInvoiceStamp {
+  id: string;
+  number?: string | null;
+  amountCents: number;
+  // UNPAID | SCHEDULED | PARTIALLY_PAID | PAID | PARTIALLY_REFUNDED |
+  // REFUNDED | CANCELED | FAILED | PAYMENT_PENDING
+  status: string;
+  sentAt: number; // when the invoice was created/sent (business date)
+  publicUrl?: string | null;
+  updatedAt: number; // Square's updated_at — newest invoice owns the stamp
 }
 
 export interface FollowUp {
@@ -219,6 +244,8 @@ export interface Lead {
   salePursuitAlertAt?: number | null; // no-pursuit alarm raised (no call since promise)
   squarePaidTotal?: number | null; // dollars collected via Square (see functions/src/squaresync.ts)
   squareVerifyFlaggedAt?: number | null; // transcript-says-paid-but-no-charge alarm raised
+  // Latest Square invoice tied to this lead (see functions/src/squaresync.ts).
+  squareInvoice?: SquareInvoiceStamp | null;
   // Transcript sounded like an ALREADY-HIRED client asking for a status
   // update while the app still shows an unsold prospect. The cadence sweep
   // pauses its chase/nudge while set; a human clearing it (or the sale being
@@ -242,6 +269,10 @@ export interface Lead {
   attorneyCallAt?: number | null;
   lostAt?: number | null;
   lostReason?: string;
+  // Stamped by reviveLost when a human pulls the lead back OUT of 'lost'.
+  // The classifier's hard-decline auto-route (functions/src/noSaleRouting.ts)
+  // treats it as final: a revived lead is never auto-re-lost by any call.
+  lostRevivedAt?: number | null;
   followUps: FollowUp[];
 
   // --- Intake checks ---
