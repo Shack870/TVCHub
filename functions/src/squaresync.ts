@@ -57,8 +57,10 @@ const LOCATION_ID = "LPK9GY4PHM28J"; // Iron Rock Law Firm
 // upgrades self-heal past decisions instead of freezing them (the July QA
 // found five retained clients still chased as prospects because their
 // markers were written by the pre-note-matcher sync and never looked at
-// again). v2 = the note-name/exact-name matcher generation.
-export const MATCHER_VERSION = 2;
+// again). v2 = the note-name/exact-name matcher generation. v3 = TVC case
+// numbers in the payment note / invoice title match leads directly — the one
+// identity key that's unique, typo-resistant, and immune to name mishearing.
+export const MATCHER_VERSION = 3;
 // Only markers newer than this get the re-check — keeps runs cheap and
 // acknowledges that stale-beyond-a-quarter money is a books problem, not a
 // board problem.
@@ -112,6 +114,7 @@ interface SqInvoice {
   id: string;
   invoice_number?: string;
   title?: string;
+  description?: string;
   // DRAFT | UNPAID | SCHEDULED | PARTIALLY_PAID | PAID | PARTIALLY_REFUNDED |
   // REFUNDED | CANCELED | FAILED | PAYMENT_PENDING
   status?: string;
@@ -265,6 +268,10 @@ export const syncSquare = onSchedule(
     const byPhone = new Map<string, LeadRef>();
     const byEmail = new Map<string, LeadRef>();
     const byName = new Map<string, LeadRef[]>();
+    // TVC case number → lead. The strongest note-text key there is: unique
+    // per case, and staff can type it without spelling anyone's name. Kept as
+    // a list so a duplicate-lead pair sharing a number refuses to match.
+    const byCaseNumber = new Map<string, LeadRef[]>();
     // Note-text identity: staff key cards manually, leaving the Square
     // customer blank — the client's name often lives ONLY in the payment's
     // free-text note ("Khup Sum Retainer Payment"). Each lead contributes
@@ -281,6 +288,12 @@ export const syncSquare = onSchedule(
       }
       const email = lc(d.email);
       if (email && !byEmail.has(email)) byEmail.set(email, lead);
+      // TVC case numbers are 7 digits (~1.4–1.6M range); the strict length
+      // keeps dollar figures like "112500" in notes from ever colliding.
+      const caseNo = String(d.tvcCaseNumber ?? "").trim();
+      if (/^\d{7}$/.test(caseNo)) {
+        byCaseNumber.set(caseNo, [...(byCaseNumber.get(caseNo) ?? []), lead]);
+      }
       const name = lc(d.name);
       if (name) byName.set(name, [...(byName.get(name) ?? []), lead]);
       const normName = normalizeText(d.name);
@@ -478,6 +491,22 @@ export const syncSquare = onSchedule(
       if (!lead && payerEmail) {
         lead = byEmail.get(lc(payerEmail));
         if (lead) matchedBy = "email";
+      }
+      if (!lead) {
+        // TVC CASE NUMBER in the note or customer record — a staff-typed
+        // case number is authoritative: unique per case and immune to the
+        // misspelled/misheard-name problems that plague name matching.
+        // Multiple distinct case numbers (or a duplicate-lead pair sharing
+        // one) refuse to match.
+        const caseHits = new Map<string, LeadRef>();
+        for (const m of `${noteText ?? ""} ${payerName ?? ""}`.matchAll(/\b(\d{7})\b/g)) {
+          const leads = byCaseNumber.get(m[1]);
+          if (leads && leads.length === 1) caseHits.set(leads[0].id, leads[0]);
+        }
+        if (caseHits.size === 1) {
+          lead = [...caseHits.values()][0];
+          matchedBy = "case_number";
+        }
       }
       if (!lead) {
         // CONCURRENT CALL — was exactly one lead on a CallRail call when the
@@ -959,6 +988,20 @@ export const syncSquare = onSchedule(
         if (hits && hits.length === 1) {
           lead = hits[0];
           matchedBy = "name";
+        }
+      }
+      if (!lead) {
+        // TVC case number in the invoice title/description — same
+        // authoritative key as the payment-note matcher.
+        const caseHits = new Map<string, LeadRef>();
+        const invText = `${inv.title ?? ""} ${inv.description ?? ""}`;
+        for (const m of invText.matchAll(/\b(\d{7})\b/g)) {
+          const leads = byCaseNumber.get(m[1]);
+          if (leads && leads.length === 1) caseHits.set(leads[0].id, leads[0]);
+        }
+        if (caseHits.size === 1) {
+          lead = [...caseHits.values()][0];
+          matchedBy = "case_number";
         }
       }
       if (!lead) {
