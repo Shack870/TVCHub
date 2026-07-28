@@ -208,6 +208,20 @@ export function isTerminal(lead: Lead): boolean {
   return ['financed', 'intake_complete', 'lost'].includes(lead.stage);
 }
 
+// "Thinking about it": their LAST real conversation ended undecided — either
+// the rep logged a 'thinking' outcome or the call AI read the pitch as
+// 'thinking'. Walk attempts newest→oldest; the first meaningful conversation
+// signal decides (a later spoke/declined/yes supersedes an old "thinking",
+// while no-answers and voicemails in between don't reset it).
+export function isThinkingItOver(lead: Lead): boolean {
+  const attempts = [...(lead.contactAttempts ?? [])].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
+  for (const a of attempts) {
+    if (a.outcome === 'thinking' || a.ai?.pitchResult === 'thinking') return true;
+    if (CONVERSATION_OUTCOMES.includes(a.outcome)) return false;
+  }
+  return false;
+}
+
 // Which stage a contact outcome moves the lead to.
 export function stageForOutcome(outcome: ContactOutcome): Stage {
   switch (outcome) {

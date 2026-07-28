@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useLeads } from '../store/useLeads';
 import { useUI } from '../store/useUI';
-import { isInitialLead, isPipelineLead, nextPendingFollowUp } from '../lib/leadFlow';
+import {
+  isInitialLead,
+  isPipelineLead,
+  isSalePending,
+  isThinkingItOver,
+  nextPendingFollowUp,
+} from '../lib/leadFlow';
 import { isBillingNote, isSystemNote } from '../lib/notes';
 import { sendToInitialLeads } from '../lib/actions';
 import { archiveMessage } from '../lib/db';
@@ -18,6 +24,11 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 type View = 'grid' | 'focus';
 type Sort = 'court' | 'newest' | 'nextTouch';
 type Scope = 'initial' | 'pipeline';
+// Pipeline-only lens on the stack. 'mostAttempts' keeps every card but
+// reorders by how many touches they've taken (the hardest chases first).
+type PipeFilter = 'all' | 'saidYes' | 'oneAttempt' | 'mostAttempts' | 'thinking';
+
+const attemptCount = (l: Lead) => l.contactAttempts?.length ?? 0;
 
 // Handled notes are paged so an old backlog never swamps the desk.
 const HANDLED_PAGE_SIZE = 9;
@@ -103,6 +114,8 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
   // Each tab has its own default order: fresh arrivals first on Initial
   // Leads, soonest scheduled touch first on the Follow-Up Pipeline.
   const [sort, setSort] = useState<Sort>('newest');
+  // Pipeline lens — defaults to All (the date order stays untouched).
+  const [pipeFilter, setPipeFilter] = useState<PipeFilter>('all');
   // Ticking clock so day-relative ranks (court proximity, overdue touches)
   // re-rank when the day rolls over instead of freezing at mount time.
   const now = useNow();
@@ -175,19 +188,40 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
     [leads],
   );
 
+  // What each pipeline lens would show, so the chips advertise their catch.
+  const pipeCounts = useMemo(() => {
+    const pipe = leads.filter(isPipelineLead);
+    return {
+      saidYes: pipe.filter(isSalePending).length,
+      oneAttempt: pipe.filter((l) => attemptCount(l) === 1).length,
+      thinking: pipe.filter(isThinkingItOver).length,
+    };
+  }, [leads]);
+
   const board = useMemo(() => {
     const inScope = scope === 'initial' ? isInitialLead : isPipelineLead;
     // An active search hunts EVERYWHERE — every stage, both scopes. A person
     // you're searching for by name/email/phone should never hide behind the
     // Initial/Pipeline tab split (the Avtar Cheira lesson: his card sat in
     // the Pipeline scope while the search ran in Initial and found nothing).
-    const list = (query ? leads : leads.filter(inScope)).filter((l) => matches(l, query));
+    let list = (query ? leads : leads.filter(inScope)).filter((l) => matches(l, query));
+    // Pipeline lens (skipped while searching — a search is already global).
+    if (scope === 'pipeline' && !query) {
+      if (pipeFilter === 'saidYes') list = list.filter(isSalePending);
+      else if (pipeFilter === 'oneAttempt') list = list.filter((l) => attemptCount(l) === 1);
+      else if (pipeFilter === 'thinking') list = list.filter(isThinkingItOver);
+      else if (pipeFilter === 'mostAttempts')
+        // A lens that's really an order: hardest-chased files first.
+        return [...list].sort(
+          (a, b) => attemptCount(b) - attemptCount(a) || appearedAt(b) - appearedAt(a),
+        );
+    }
     if (sort === 'court') return [...list].sort((a, b) => courtRank(a) - courtRank(b));
     if (sort === 'nextTouch') return [...list].sort((a, b) => nextTouchRank(a) - nextTouchRank(b));
     return [...list].sort((a, b) => appearedAt(b) - appearedAt(a));
     // `now` re-runs the day-relative ranks (courtRank) across day boundaries.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leads, query, sort, scope, now]);
+  }, [leads, query, sort, scope, pipeFilter, now]);
 
   const safeSel = Math.min(sel, Math.max(0, board.length - 1));
   const current = board[safeSel];
@@ -278,6 +312,34 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
         setScope(v as Scope);
         setSel(0);
         setSort(v === 'pipeline' ? 'nextTouch' : 'newest');
+        setPipeFilter('all');
+      }}
+    />
+  );
+  // The pipeline lens: All keeps the usual order; the rest narrow (or, for
+  // Most Attempts, reorder) the stack. Counts preview what each lens holds.
+  const pipeFilterToggle = scope === 'pipeline' && (
+    <Toggle
+      options={[
+        { id: 'all', label: 'All' },
+        {
+          id: 'saidYes',
+          label: `Said Yes${pipeCounts.saidYes ? ` (${pipeCounts.saidYes})` : ''}`,
+        },
+        {
+          id: 'oneAttempt',
+          label: `1 Attempt${pipeCounts.oneAttempt ? ` (${pipeCounts.oneAttempt})` : ''}`,
+        },
+        { id: 'mostAttempts', label: 'Most Attempts' },
+        {
+          id: 'thinking',
+          label: `Thinking It Over${pipeCounts.thinking ? ` (${pipeCounts.thinking})` : ''}`,
+        },
+      ]}
+      value={pipeFilter}
+      onChange={(v) => {
+        setPipeFilter(v as PipeFilter);
+        setSel(0);
       }}
     />
   );
@@ -343,7 +405,10 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
         </header>
       )}
 
-      <div className="mb-5">{scopeToggle}</div>
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        {scopeToggle}
+        {pipeFilterToggle}
+      </div>
 
       {(noteTabs.tvc.length > 0 || noteTabs.action.length > 0 || noteTabs.handled.length > 0) && (
         <section className="mb-7">

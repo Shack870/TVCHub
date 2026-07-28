@@ -11,6 +11,7 @@ import {
   isPlanStalled,
   isRipe,
   isTerminal,
+  isThinkingItOver,
   makeEmptyLead,
   nextPendingFollowUp,
   showsMotionsDeadline,
@@ -29,6 +30,38 @@ describe('stageForOutcome', () => {
     expect(stageForOutcome('declined')).toBe('nurture');
     expect(stageForOutcome('retained')).toBe('intake_complete');
     expect(stageForOutcome('lost')).toBe('lost');
+  });
+});
+
+describe('isThinkingItOver', () => {
+  const at = (h: number) => Date.now() - h * 3600_000;
+
+  it('true when the last conversation was a thinking outcome', () => {
+    const lead = makeLead({
+      contactAttempts: [{ ts: at(24), outcome: 'spoke' }, { ts: at(2), outcome: 'thinking' }],
+    });
+    expect(isThinkingItOver(lead)).toBe(true);
+  });
+
+  it('true from the call AI reading the pitch as thinking', () => {
+    const lead = makeLead({
+      contactAttempts: [
+        { ts: at(2), outcome: 'spoke', ai: { pitchResult: 'thinking' } } as never,
+      ],
+    });
+    expect(isThinkingItOver(lead)).toBe(true);
+  });
+
+  it('unaffected by later no-answers, superseded by a later real conversation', () => {
+    const stillThinking = makeLead({
+      contactAttempts: [{ ts: at(48), outcome: 'thinking' }, { ts: at(1), outcome: 'no_answer' }],
+    });
+    expect(isThinkingItOver(stillThinking)).toBe(true);
+    const decided = makeLead({
+      contactAttempts: [{ ts: at(48), outcome: 'thinking' }, { ts: at(1), outcome: 'declined' }],
+    });
+    expect(isThinkingItOver(decided)).toBe(false);
+    expect(isThinkingItOver(makeLead({ contactAttempts: [] }))).toBe(false);
   });
 });
 
