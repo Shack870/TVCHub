@@ -28,7 +28,12 @@ import { stampHeartbeat } from "./heartbeat.js";
 // A verification pass then runs the reconciliation in reverse: leads whose
 // transcript claimed money was collected (saleStatus paid_full/paid_partial)
 // but where no Square charge ever matched get a billing-escalation post-it —
-// "the call says paid, the processor says nothing".
+// "the call says paid, the processor says nothing". Before alarming, the pass
+// cross-references the matcher's own unattributed pool (unmatched markers and
+// this run's uncredited payments, ±7 days of the claim): a charge naming the
+// lead with a consistent amount is auto-credited instead of alarmed about,
+// and an amount-only/partial candidate is NAMED in the alarm so a human can
+// confirm-and-credit rather than hunt for money the sync already saw.
 //
 // An INVOICE pass follows: the office retains by Square invoice too
 // ("Retainer Agreement - <name>", emailed). Each invoice's status is stamped
@@ -60,7 +65,11 @@ const LOCATION_ID = "LPK9GY4PHM28J"; // Iron Rock Law Firm
 // again). v2 = the note-name/exact-name matcher generation. v3 = TVC case
 // numbers in the payment note / invoice title match leads directly — the one
 // identity key that's unique, typo-resistant, and immune to name mishearing.
-export const MATCHER_VERSION = 3;
+// v4 = the concurrent-call interval index only counts calls that were actual
+// conversations: no-answer/voicemail attempts can no longer become concurrent
+// candidates OR veto a note match (the Matthew Jones case — his $1,125 charge
+// was refused because a NO-ANSWER call to Bohdan Tsymbalyuk "overlapped").
+export const MATCHER_VERSION = 4;
 // Only markers newer than this get the re-check — keeps runs cheap and
 // acknowledges that stale-beyond-a-quarter money is a books problem, not a
 // board problem.
@@ -73,6 +82,78 @@ const lc = (s: unknown): string => String(s ?? "").toLowerCase().trim();
 // payment notes and lead names are reduced to before substring matching.
 const normalizeText = (s: unknown): string =>
   lc(s).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+
+// Name variants a lead contributes to note-text searching: "first … last",
+// "last … first" reversed, and first+last skipping middle names. Shared by
+// the payment-note matcher's index and the verify pass's cross-reference
+// scan. Length floor keeps junk like "Al Bo" from substring-matching notes.
+export const nameNeedles = (name: unknown): string[] => {
+  const normName = normalizeText(name);
+  if (normName.length < 6) return [];
+  const parts = normName.split(" ");
+  const needles = new Set<string>([parts.join(" ")]);
+  if (parts.length >= 2) {
+    needles.add([...parts].reverse().join(" "));
+    needles.add(`${parts[0]} ${parts[parts.length - 1]}`);
+    needles.add(`${parts[parts.length - 1]} ${parts[0]}`);
+  }
+  return [...needles].filter((n) => n.length >= 6);
+};
+
+// Was this CallRail attempt an actual connected call? Only these belong in
+// the concurrent-call interval index: a card payment keyed "mid-call" only
+// makes sense during a call somebody ANSWERED. A no-answer/voicemail attempt
+// must never become a concurrent-call candidate — nor veto someone else's
+// note match (the Matthew Jones case: his charge, note naming him, was
+// refused because a NO-ANSWER call to another lead happened to overlap).
+// The transcript classifier's connection verdict is the best signal when it
+// has one ('unclear' means it doesn't — fall back to the outcome, which the
+// CallRail sync derives from the answered/voicemail flags).
+export const isConnectedCallAttempt = (a: {
+  outcome?: unknown;
+  ai?: { connection?: unknown } | null;
+}): boolean => {
+  const conn = a.ai?.connection;
+  if (conn === "conversation" || conn === "brief") return true;
+  if (conn === "voicemail" || conn === "wrong_number") return false;
+  return a.outcome !== "no_answer" && a.outcome !== "voicemail";
+};
+
+// Corroboration tolerance for amount checks (concurrent-call matcher and the
+// verify pass's cross-reference scan).
+const AMOUNT_TOLERANCE = 5; // dollars
+
+// Verify-pass cross-reference: how strongly does an unattributed Square
+// payment look like the charge a "transcript says paid" lead claims?
+//   strong — the note/customer record names THIS lead and the amount is
+//            consistent with the claim (equal / half of the fee, or the lead
+//            has no recorded fee to constrain it) → safe to auto-credit.
+//   weak   — amount matches but nothing names the lead, or the name matches
+//            with an inconsistent amount → a human confirms, but the alarm
+//            must SAY the candidate exists.
+//   none   — nothing connects them.
+export type VerifyCandidateStrength = "strong" | "weak" | "none";
+export const classifyVerifyCandidate = (opts: {
+  leadName: unknown;
+  feeDollars: number | null; // the claimed/lead fee (saleAmount), if recorded
+  paymentDollars: number;
+  note?: string | null;
+  payerName?: string | null;
+}): VerifyCandidateStrength => {
+  const needles = nameNeedles(opts.leadName);
+  const hay = ` ${normalizeText(opts.note)} ${normalizeText(opts.payerName)} `;
+  const nameHit = needles.some((n) => hay.includes(` ${n} `));
+  const fee = opts.feeDollars;
+  const amountMatches =
+    fee !== null &&
+    fee > 0 &&
+    (Math.abs(opts.paymentDollars - fee) <= AMOUNT_TOLERANCE ||
+      Math.abs(opts.paymentDollars * 2 - fee) <= AMOUNT_TOLERANCE);
+  const amountConsistent = fee === null || fee <= 0 || amountMatches;
+  if (nameHit && amountConsistent) return "strong";
+  if (nameHit || amountMatches) return "weak";
+  return "none";
+};
 
 export interface SqMoney {
   amount?: number; // smallest currency unit (cents for USD)
@@ -304,19 +385,8 @@ export const syncSquare = onSchedule(
       }
       const name = lc(d.name);
       if (name) byName.set(name, [...(byName.get(name) ?? []), lead]);
-      const normName = normalizeText(d.name);
-      // Length floor keeps junk like "Al Bo" from substring-matching notes.
-      if (normName.length >= 6) {
-        const parts = normName.split(" ");
-        const needles = new Set<string>([parts.join(" ")]);
-        if (parts.length >= 2) {
-          needles.add([...parts].reverse().join(" "));
-          needles.add(`${parts[0]} ${parts[parts.length - 1]}`);
-          needles.add(`${parts[parts.length - 1]} ${parts[0]}`);
-        }
-        const usable = [...needles].filter((n) => n.length >= 6);
-        if (usable.length) noteNameIndex.push({ needles: usable, lead });
-      }
+      const usable = nameNeedles(d.name);
+      if (usable.length) noteNameIndex.push({ needles: usable, lead });
     }
 
     // CALL-TIME identity needs every CallRail attempt (full contactAttempts
@@ -361,6 +431,11 @@ export const syncSquare = onSchedule(
         for (const a of Array.isArray(d.contactAttempts) ? d.contactAttempts : []) {
           if (a?.via !== "callrail" || typeof a.ts !== "number") continue;
           if (a.ts < cutoff) continue;
+          // Only calls that actually CONNECTED belong in the interval index —
+          // both as concurrent-call candidates and as veto/conflict material.
+          // A no-answer or voicemail attempt is not a call a card could have
+          // been keyed during (see isConnectedCallAttempt / the Jones case).
+          if (!isConnectedCallAttempt(a)) continue;
           const durMs =
             typeof a.durationSec === "number" && a.durationSec > 0
               ? a.durationSec * 1000
@@ -421,14 +496,140 @@ export const syncSquare = onSchedule(
         );
     };
 
-    // Corroboration tolerance for the concurrent-call matcher's amount check.
-    const AMOUNT_TOLERANCE = 5; // dollars
-
     const customerCache = new Map<string, SqCustomer | null>();
     let matched = 0;
     let unmatched = 0;
     let ambiguityPostIts = 0;
     let escalationsCleared = 0;
+    // Payments THIS run left unmatched, with the payer identity that was
+    // resolved for them — the verify pass's cross-reference scan reuses these
+    // without another Square fetch.
+    const unmatchedThisRun = new Map<string, { payment: SqPayment; payerName: string | null }>();
+
+    // Roll a confidently-identified payment onto its lead: contact-attempt
+    // entry, squarePaidTotal rollup, paid_full/paid_partial sale state, the
+    // move to intake_complete, and standing down open billing-escalation
+    // post-its. Shared by the main matcher and the verify pass's strong
+    // cross-reference credit — both MUST behave identically. Returns the
+    // action string for the marker doc.
+    const creditPaymentToLead = async (
+      leadId: string,
+      payment: SqPayment,
+      buildNotes: (attempts: { via?: string; ts?: number }[]) => string,
+    ): Promise<string> => {
+      const cents = payment.amount_money?.amount ?? 0;
+      const dollars = cents / 100;
+      const amountLabel = fmtDollars(cents);
+      const paidTs = new Date(payment.created_at).getTime() || Date.now();
+
+      let action = "payment_logged";
+      await db.runTransaction(async (tx) => {
+        const ref = db.collection("leads").doc(leadId);
+        const snap = await tx.get(ref);
+        if (!snap.exists) return;
+        const d = snap.data()!;
+        if (d.deletedAt) return;
+
+        const attempts = Array.isArray(d.contactAttempts) ? d.contactAttempts : [];
+        // Belt and braces on top of the marker doc: never double-log a
+        // payment. Already on the lead (an earlier sync run, or a HUMAN
+        // hand-credit — the Matthew Jones fix) means the money was already
+        // counted too: leave the lead completely untouched, or a marker
+        // re-evaluation would double-roll squarePaidTotal.
+        const alreadyLogged = attempts.some(
+          (a: { paymentId?: string; notes?: string }) =>
+            a.paymentId === payment.id || (a.notes ?? "").includes(payment.id),
+        );
+        if (alreadyLogged) {
+          action = d.saleStatus === "paid_full" ? "paid_full" : "payment_logged";
+          return;
+        }
+
+        const now = Date.now();
+        const patch: Record<string, unknown> = { updatedAt: now };
+        patch.contactAttempts = [
+          ...attempts,
+          {
+            ts: paidTs,
+            outcome: "retained",
+            via: "square",
+            notes: buildNotes(attempts),
+            by: "Square sync",
+            paymentId: payment.id,
+          },
+        ];
+
+        // Sale rollup. squarePaidTotal accumulates every synced payment so
+        // installments eventually flip a partial to paid-in-full.
+        const paidTotal = ((d.squarePaidTotal as number) ?? 0) + dollars;
+        patch.squarePaidTotal = paidTotal;
+        // Fresh money resets the stalled-plan watch (see cadence.ts) so the
+        // next silent stretch gets its own post-it.
+        patch.planStallFlaggedAt = null;
+
+        const saleAmount = (d.saleAmount as number) ?? null;
+        const coversFee = !saleAmount || dollars >= saleAmount || paidTotal >= saleAmount;
+        const alreadyPaidFull = d.saleStatus === "paid_full"; // never downgrade
+
+        if (coversFee || alreadyPaidFull) {
+          patch.saleStatus = "paid_full";
+          if (!alreadyPaidFull) patch.saleStatusAt = paidTs;
+          patch.saleEscalatedAt = null;
+          patch.salePursuitAlertAt = null;
+          // Money collected — close open billing follow-ups (same semantics
+          // as the manual "Mark Paid" button).
+          const followUps = Array.isArray(d.followUps) ? d.followUps : [];
+          patch.followUps = followUps.map((f: { done?: boolean; type?: string }) =>
+            !f.done && f.type === "billing" ? { ...f, done: true, doneAt: now } : f,
+          );
+          // Paid in full moves the lead off the working board — but never
+          // out of intake_complete/financed (no downgrades).
+          if (d.stage !== "intake_complete" && d.stage !== "financed") {
+            const day = new Date(paidTs).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              timeZone: "America/Chicago",
+            });
+            patch.stage = "intake_complete";
+            patch.intakeComplete = true;
+            patch.intakeCompleteAt = paidTs;
+            patch.retainedAt = (d.retainedAt as number) ?? paidTs;
+            patch.autoStageNote = `Stage moved to Intake Complete by Square sync — ${amountLabel} payment received on ${day}`;
+            patch.autoStageAt = now;
+            action = "paid_full_moved";
+          } else {
+            action = "paid_full";
+          }
+        } else {
+          patch.saleStatus = "paid_partial";
+          patch.saleStatusAt = paidTs;
+          patch.saleEscalatedAt = null;
+          patch.salePursuitAlertAt = null;
+          action = "paid_partial";
+        }
+
+        tx.update(ref, patch);
+      });
+
+      // The money arrived — stand down any open billing-escalation post-its.
+      const escalations = await db
+        .collection("messages")
+        .where("leadId", "==", leadId)
+        .where("kind", "==", "billing_escalation")
+        .where("handled", "==", false)
+        .get();
+      for (const m of escalations.docs) {
+        if (m.data().deletedAt) continue;
+        await m.ref.update({
+          handled: true,
+          handledAt: paidTs,
+          handledBy: "Square sync",
+          updatedAt: Date.now(),
+        });
+        escalationsCleared++;
+      }
+      return action;
+    };
 
     for (const payment of completed) {
       const marker = db.collection("squarePayments").doc(payment.id);
@@ -715,132 +916,39 @@ export const syncSquare = onSchedule(
           { merge: true },
         );
         unmatched++;
+        // Either flavor of "nobody credited" (ambiguous OR silently ignored)
+        // is cross-reference material for the verify pass: these are the
+        // COMPLETED payments of the current fetch window that no lead got.
+        unmatchedThisRun.set(payment.id, { payment, payerName });
         continue;
       }
 
       // Confident match — roll the payment onto the lead in a transaction.
-      let action = "payment_logged";
-      await db.runTransaction(async (tx) => {
-        const ref = db.collection("leads").doc(lead!.id);
-        const snap = await tx.get(ref);
-        if (!snap.exists) return;
-        const d = snap.data()!;
-        if (d.deletedAt) return;
-
-        const attempts = Array.isArray(d.contactAttempts) ? d.contactAttempts : [];
-        // Belt and braces on top of the marker doc: never double-log a payment.
-        const alreadyLogged = attempts.some(
-          (a: { paymentId?: string; notes?: string }) =>
-            a.paymentId === payment.id || (a.notes ?? "").includes(payment.id),
-        );
-
-        const now = Date.now();
-        const patch: Record<string, unknown> = { updatedAt: now };
-        if (!alreadyLogged) {
-          let notes = `Square payment received — ${amountLabel} (payment ${payment.id})`;
-          if (matchedBy === "concurrent_call" && concurrentDetail) {
-            notes += ` — matched by concurrent call: ${concurrentDetail}`;
-            if (noteText) notes += ` (payment note: "${noteText}")`;
-          }
-          if (matchedBy === "note") {
-            notes += ` — matched by payment note "${noteText}"`;
-            // Corroboration: staff charge the card DURING or right after the
-            // retain call, so a note-matched payment landing within 3h of a
-            // CallRail call on this same lead is near-certain identity.
-            const call = attempts.find(
-              (a: { via?: string; ts?: number }) =>
-                a?.via === "callrail" &&
-                typeof a.ts === "number" &&
-                paidTs > a.ts &&
-                paidTs <= a.ts + 3 * 3600_000,
-            );
-            if (call) {
-              const mins = Math.max(1, Math.round((paidTs - (call.ts as number)) / 60_000));
-              notes += `; corroborated — charge landed ${mins}m after a CallRail call on this lead`;
-            }
-          }
-          patch.contactAttempts = [
-            ...attempts,
-            {
-              ts: paidTs,
-              outcome: "retained",
-              via: "square",
-              notes,
-              by: "Square sync",
-              paymentId: payment.id,
-            },
-          ];
+      const action = await creditPaymentToLead(lead.id, payment, (attempts) => {
+        let notes = `Square payment received — ${amountLabel} (payment ${payment.id})`;
+        if (matchedBy === "concurrent_call" && concurrentDetail) {
+          notes += ` — matched by concurrent call: ${concurrentDetail}`;
+          if (noteText) notes += ` (payment note: "${noteText}")`;
         }
-
-        // Sale rollup. squarePaidTotal accumulates every synced payment so
-        // installments eventually flip a partial to paid-in-full.
-        const paidTotal = ((d.squarePaidTotal as number) ?? 0) + dollars;
-        patch.squarePaidTotal = paidTotal;
-        // Fresh money resets the stalled-plan watch (see cadence.ts) so the
-        // next silent stretch gets its own post-it.
-        patch.planStallFlaggedAt = null;
-
-        const saleAmount = (d.saleAmount as number) ?? null;
-        const coversFee = !saleAmount || dollars >= saleAmount || paidTotal >= saleAmount;
-        const alreadyPaidFull = d.saleStatus === "paid_full"; // never downgrade
-
-        if (coversFee || alreadyPaidFull) {
-          patch.saleStatus = "paid_full";
-          if (!alreadyPaidFull) patch.saleStatusAt = paidTs;
-          patch.saleEscalatedAt = null;
-          patch.salePursuitAlertAt = null;
-          // Money collected — close open billing follow-ups (same semantics
-          // as the manual "Mark Paid" button).
-          const followUps = Array.isArray(d.followUps) ? d.followUps : [];
-          patch.followUps = followUps.map((f: { done?: boolean; type?: string }) =>
-            !f.done && f.type === "billing" ? { ...f, done: true, doneAt: now } : f,
+        if (matchedBy === "note") {
+          notes += ` — matched by payment note "${noteText}"`;
+          // Corroboration: staff charge the card DURING or right after the
+          // retain call, so a note-matched payment landing within 3h of a
+          // CallRail call on this same lead is near-certain identity.
+          const call = attempts.find(
+            (a) =>
+              a?.via === "callrail" &&
+              typeof a.ts === "number" &&
+              paidTs > a.ts &&
+              paidTs <= a.ts + 3 * 3600_000,
           );
-          // Paid in full moves the lead off the working board — but never
-          // out of intake_complete/financed (no downgrades).
-          if (d.stage !== "intake_complete" && d.stage !== "financed") {
-            const day = new Date(paidTs).toLocaleDateString("en-US", {
-              month: "short",
-              day: "numeric",
-              timeZone: "America/Chicago",
-            });
-            patch.stage = "intake_complete";
-            patch.intakeComplete = true;
-            patch.intakeCompleteAt = paidTs;
-            patch.retainedAt = (d.retainedAt as number) ?? paidTs;
-            patch.autoStageNote = `Stage moved to Intake Complete by Square sync — ${amountLabel} payment received on ${day}`;
-            patch.autoStageAt = now;
-            action = "paid_full_moved";
-          } else {
-            action = "paid_full";
+          if (call) {
+            const mins = Math.max(1, Math.round((paidTs - (call.ts as number)) / 60_000));
+            notes += `; corroborated — charge landed ${mins}m after a CallRail call on this lead`;
           }
-        } else {
-          patch.saleStatus = "paid_partial";
-          patch.saleStatusAt = paidTs;
-          patch.saleEscalatedAt = null;
-          patch.salePursuitAlertAt = null;
-          action = "paid_partial";
         }
-
-        tx.update(ref, patch);
+        return notes;
       });
-
-      // The money arrived — stand down any open billing-escalation post-its.
-      const escalations = await db
-        .collection("messages")
-        .where("leadId", "==", lead.id)
-        .where("kind", "==", "billing_escalation")
-        .where("handled", "==", false)
-        .get();
-      for (const m of escalations.docs) {
-        if (m.data().deletedAt) continue;
-        await m.ref.update({
-          handled: true,
-          handledAt: paidTs,
-          handledBy: "Square sync",
-          updatedAt: Date.now(),
-        });
-        escalationsCleared++;
-      }
 
       await marker.set(
         {
@@ -868,7 +976,50 @@ export const syncSquare = onSchedule(
     // The CallRail classifier sets paid_full/paid_partial from what was SAID
     // on a call. If 24h+ has passed and no Square charge ever matched the
     // lead, the claimed money may never have moved — raise the alarm once.
+    //
+    // BUT: before alarming, cross-reference the matcher's OWN records. The
+    // Matthew Jones case: his $1,125 charge sat in squarePayments as an
+    // unmatched marker whose note NAMED HIM, while this pass swore "no Square
+    // charge has been found". The money was found — the matcher just refused
+    // to place it. So each would-be alarm first scans the unattributed pool
+    // (unmatched markers + this run's uncredited payments) within ±7 days of
+    // the sale claim:
+    //   strong (names this lead + amount consistent) → auto-credit, no alarm;
+    //   weak (amount-only, or name with wrong amount) → alarm, but name the
+    //     candidate charge so a human can confirm-and-credit;
+    //   none → the original alarm text stands.
     let verifyFlagged = 0;
+    let verifyCredited = 0;
+    const VERIFY_SCAN_WINDOW_MS = 7 * 86400_000; // ±7 days around the claim
+
+    // The unattributed pool, loaded lazily (only when a lead actually needs
+    // the cross-reference): every marker with action "unmatched", hydrated
+    // with the payment's note/amount/time — from this run's fetch when
+    // possible, from Square's single-payment endpoint otherwise (markers
+    // don't store the note) — plus this run's silently-ignored payments.
+    type VerifyPoolEntry = { payment: SqPayment; payerName: string | null };
+    let verifyPool: VerifyPoolEntry[] | null = null;
+    const loadVerifyPool = async (): Promise<VerifyPoolEntry[]> => {
+      if (verifyPool) return verifyPool;
+      const pool = new Map<string, VerifyPoolEntry>(unmatchedThisRun);
+      const markerSnap = await db
+        .collection("squarePayments")
+        .where("action", "==", "unmatched")
+        .select("payerName")
+        .get();
+      for (const m of markerSnap.docs) {
+        if (pool.has(m.id)) continue;
+        const p = await fetchPayment(token, m.id);
+        if (!p || p.status !== "COMPLETED") continue;
+        pool.set(m.id, {
+          payment: p,
+          payerName: (m.data().payerName as string | null) ?? null,
+        });
+      }
+      verifyPool = [...pool.values()];
+      return verifyPool;
+    };
+
     const now = Date.now();
     const paidLeads = await db
       .collection("leads")
@@ -888,14 +1039,130 @@ export const syncSquare = onSchedule(
       if (now - statusAt < 24 * 3600_000) continue; // give the charge time to land
       if (statusAt < backfillStartAt) continue; // charge would predate Square visibility
 
-      const amt = d.saleAmount ? `$${d.saleAmount}` : "an unknown amount";
+      const feeDollars =
+        typeof d.saleAmount === "number" && d.saleAmount > 0 ? (d.saleAmount as number) : null;
+
+      // Cross-reference the unattributed pool before alarming.
+      const pool = await loadVerifyPool();
+      let strong: VerifyPoolEntry | null = null;
+      const weak: VerifyPoolEntry[] = [];
+      for (const entry of pool) {
+        const t = new Date(entry.payment.created_at).getTime() || 0;
+        if (Math.abs(t - statusAt) > VERIFY_SCAN_WINDOW_MS) continue;
+        const verdict = classifyVerifyCandidate({
+          leadName: d.name,
+          feeDollars,
+          paymentDollars: (entry.payment.amount_money?.amount ?? 0) / 100,
+          note: entry.payment.note ?? null,
+          payerName: entry.payerName,
+        });
+        if (verdict === "strong") {
+          // Closest-in-time strong candidate wins (several is near-impossible).
+          if (
+            !strong ||
+            Math.abs(t - statusAt) <
+              Math.abs((new Date(strong.payment.created_at).getTime() || 0) - statusAt)
+          ) {
+            strong = entry;
+          }
+        } else if (verdict === "weak") {
+          weak.push(entry);
+        }
+      }
+
+      const chicagoTime = (ts: number): string =>
+        new Date(ts).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: "America/Chicago",
+        });
+      const amt = feeDollars ? `$${feeDollars}` : "an unknown amount";
       const day = new Date(statusAt).toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
         timeZone: "America/Chicago",
       });
+
+      if (strong) {
+        // STRONG: the charge the transcript promised exists, unattributed, and
+        // carries this lead's own name with a consistent amount. Credit it
+        // exactly like a normal match — this is precisely what a human did for
+        // Matthew Jones, and it must never require a human again.
+        const p = strong.payment;
+        const cents = p.amount_money?.amount ?? 0;
+        const paidTs = new Date(p.created_at).getTime() || now;
+        const reconciledBy =
+          `verify-pass cross-reference: the lead was marked ${d.saleStatus} on ${day} with no ` +
+          `credited Square charge, and this unattributed ${fmtDollars(cents)} payment ` +
+          `(keyed ${chicagoTime(paidTs)}${p.note ? `, note "${p.note}"` : ""}` +
+          `${strong.payerName ? `, customer "${strong.payerName}"` : ""}) names the lead with a ` +
+          `consistent amount`;
+        const action = await creditPaymentToLead(
+          doc.id,
+          p,
+          () =>
+            `Square payment received — ${fmtDollars(cents)} (payment ${p.id}) — ${reconciledBy}`,
+        );
+        await db.collection("squarePayments").doc(p.id).set(
+          {
+            processedAt: Date.now(),
+            leadId: doc.id,
+            action,
+            matchedBy: "verify_cross_reference",
+            amountCents: cents,
+            matcherVersion: MATCHER_VERSION,
+            reconciledBy,
+          },
+          { merge: true },
+        );
+        // The payment's own ambiguity post-it (if one was raised) is resolved
+        // by this credit — stand it down like the billing escalations.
+        const open = await db
+          .collection("messages")
+          .where("squarePaymentId", "==", p.id)
+          .where("handled", "==", false)
+          .get();
+        for (const m of open.docs) {
+          if (m.data().deletedAt) continue;
+          await m.ref.update({
+            handled: true,
+            handledAt: paidTs,
+            handledBy: "Square sync",
+            updatedAt: Date.now(),
+          });
+        }
+        // Drop it from the pool so a second claimant can't double-credit it.
+        verifyPool = pool.filter((e) => e.payment.id !== p.id);
+        matched++;
+        verifyCredited++;
+        logger.info("Verify pass credited an unattributed payment by cross-reference", {
+          paymentId: p.id,
+          leadId: doc.id,
+          name: d.name,
+          amount: fmtDollars(cents),
+          action,
+          reconciledBy,
+        });
+        continue; // money found — no alarm
+      }
+
       // Mirrors the cadence engine's billing-escalation post-it convention
       // (see postIt in cadence.ts) so it gets the same gold treatment.
+      // WEAK candidates make the alarm accurate: an unattributed charge that
+      // MAY be this payment exists, and the note must say so instead of
+      // claiming no charge was found.
+      const weakLines = weak.slice(0, 3).map((e) => {
+        const cents = e.payment.amount_money?.amount ?? 0;
+        const t = new Date(e.payment.created_at).getTime() || 0;
+        return (
+          `A ${fmtDollars(cents)} charge (${e.payment.id}, keyed ${chicagoTime(t)}` +
+          `${e.payment.note ? `, note "${e.payment.note}"` : ", no note"}` +
+          `${e.payerName ? `, customer "${e.payerName}"` : ""}) exists unattributed in Square ` +
+          `and may be this payment.`
+        );
+      });
       await db.collection("messages").add({
         kind: "billing_escalation",
         source: "system",
@@ -904,9 +1171,13 @@ export const syncSquare = onSchedule(
         subject: `Transcript says PAID but no Square charge — ${d.name}`,
         message:
           `${d.name} was marked ${d.saleStatus === "paid_full" ? "paid in full" : "partially paid"}` +
-          ` (${amt}) on ${day}, but no matching Square charge has been found since.` +
-          ` Either the payment ran outside Square (check the ledger) or the call's` +
-          ` payment claim was wrong — verify the money actually moved.`,
+          ` (${amt}) on ${day}, but no Square charge has been credited to them since.` +
+          (weakLines.length
+            ? `\n${weakLines.join("\n")}` +
+              `\nConfirm and credit it (log the payment and mark the sale paid), or verify the ` +
+              `money ran outside Square.`
+            : ` Either the payment ran outside Square (check the ledger) or the call's` +
+              ` payment claim was wrong — verify the money actually moved.`),
         tvcCaseNumber: null,
         memberName: d.name,
         leadId: doc.id,
@@ -915,6 +1186,7 @@ export const syncSquare = onSchedule(
         nonPaymentReason: null,
         noPursuit: false,
         gmailMessageId: null,
+        squarePaymentId: weak.length === 1 ? weak[0].payment.id : null,
         receivedAt: statusAt,
         handled: false,
         createdAt: now,
@@ -928,6 +1200,7 @@ export const syncSquare = onSchedule(
         saleStatus: d.saleStatus,
         saleAmount: d.saleAmount ?? null,
         saleStatusAt: statusAt,
+        weakCandidates: weak.map((e) => e.payment.id),
       });
     }
 
@@ -1162,6 +1435,7 @@ export const syncSquare = onSchedule(
       ambiguityPostIts,
       escalationsCleared,
       verifyFlagged,
+      verifyCredited,
       invoicesProcessed: invoicesSeen,
       invoicesMatched,
       invoicePostIts,
