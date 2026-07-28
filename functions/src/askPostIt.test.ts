@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_WINDOW_DAYS,
   buildContext,
   fmtChicago,
   historyMessages,
+  invoiceRow,
+  paymentAttribution,
+  paymentRow,
+  resolvePaymentWindow,
   serializeAttempt,
   serializeLead,
   serializeMessage,
@@ -188,5 +193,149 @@ describe("historyMessages", () => {
   it("drops malformed turns and tolerates a missing array", () => {
     expect(historyMessages(undefined)).toEqual([]);
     expect(historyMessages([{ role: "system", text: "x" }, { role: "user" }])).toEqual([]);
+  });
+});
+
+// ---------- Live Square tool seams ----------
+
+describe("resolvePaymentWindow", () => {
+  it("accepts a valid range and normalizes to ISO", () => {
+    const w = resolvePaymentWindow("2026-07-24T00:00:00-05:00", "2026-07-25T00:00:00-05:00");
+    expect(w).toEqual({
+      beginIso: "2026-07-24T05:00:00.000Z",
+      endIso: "2026-07-25T05:00:00.000Z",
+      clampNote: null,
+    });
+  });
+  it("rejects missing or unparseable bounds", () => {
+    expect(resolvePaymentWindow(undefined, "2026-07-25")).toHaveProperty("error");
+    expect(resolvePaymentWindow("2026-07-24", undefined)).toHaveProperty("error");
+    expect(resolvePaymentWindow("not a date", "also not")).toHaveProperty("error");
+  });
+  it("tolerates a swapped range", () => {
+    const w = resolvePaymentWindow("2026-07-25T00:00:00Z", "2026-07-24T00:00:00Z");
+    expect(w).toMatchObject({
+      beginIso: "2026-07-24T00:00:00.000Z",
+      endIso: "2026-07-25T00:00:00.000Z",
+    });
+  });
+  it(`clamps windows wider than ${MAX_WINDOW_DAYS} days`, () => {
+    const w = resolvePaymentWindow("2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z");
+    if ("error" in w) throw new Error("unexpected error");
+    expect(w.beginIso).toBe("2026-01-01T00:00:00.000Z");
+    expect(Date.parse(w.endIso) - Date.parse(w.beginIso)).toBe(MAX_WINDOW_DAYS * 86400_000);
+    expect(w.clampNote).toContain(`${MAX_WINDOW_DAYS} days`);
+  });
+});
+
+describe("paymentAttribution", () => {
+  const names = new Map([["lead1", "Saddam Saleh"]]);
+  it("names the matched lead with the match method", () => {
+    expect(paymentAttribution({ leadId: "lead1", matchedBy: "phone" }, names)).toBe(
+      "matched to lead Saddam Saleh [lead1] by phone",
+    );
+  });
+  it("survives a matched lead whose doc is gone", () => {
+    expect(paymentAttribution({ leadId: "gone" }, names)).toBe(
+      "matched to lead (name unknown) [gone]",
+    );
+  });
+  it("maps unmatched and ignored markers to unattributed", () => {
+    expect(paymentAttribution({ leadId: null, action: "unmatched" }, names)).toBe("unattributed");
+    expect(paymentAttribution({ action: "ignored_unrelated" }, names)).toBe("unattributed");
+  });
+  it("flags payments the sync never saw", () => {
+    expect(paymentAttribution(null, names)).toBe("never processed by sync");
+  });
+});
+
+describe("paymentRow", () => {
+  // 2026-07-10 14:30:00 UTC = 9:30 AM Chicago.
+  const payment = {
+    id: "pay_1",
+    status: "COMPLETED",
+    created_at: "2026-07-10T14:30:00Z",
+    amount_money: { amount: 112500, currency: "USD" },
+    note: "Khup Sum Retainer Payment",
+    buyer_email_address: "buyer@example.com",
+  };
+  it("serializes Chicago time, dollars, note, marker-cached payer, attribution", () => {
+    const row = paymentRow(
+      payment,
+      {
+        leadId: null,
+        action: "ignored_unrelated",
+        payerName: "Khup Sum",
+        payerEmail: "khup@example.com",
+        payerPhone: "+15015550142",
+      },
+      new Map(),
+    );
+    expect(row).toEqual({
+      id: "pay_1",
+      created: "Jul 10, 2026, 9:30 AM",
+      status: "COMPLETED",
+      dollars: 1125,
+      note: "Khup Sum Retainer Payment",
+      payer_name: "Khup Sum",
+      payer_email: "khup@example.com",
+      payer_phone: "+15015550142",
+      attribution: "unattributed",
+    });
+  });
+  it("falls back to the payment's buyer email and omits empty fields", () => {
+    const row = paymentRow({ ...payment, note: undefined }, null, new Map());
+    expect(row.payer_email).toBe("buyer@example.com");
+    expect(row).not.toHaveProperty("note");
+    expect(row).not.toHaveProperty("payer_name");
+    expect(row.attribution).toBe("never processed by sync");
+  });
+  it("tolerates a payment with no amount", () => {
+    const row = paymentRow({ id: "p2", status: "COMPLETED", created_at: "bad" }, null, new Map());
+    expect(row.dollars).toBe(0);
+    expect(row.created).toBe("unknown");
+  });
+});
+
+describe("invoiceRow", () => {
+  it("serializes number, status, amount, recipient, times, and matched lead", () => {
+    const row = invoiceRow(
+      {
+        id: "inv_1",
+        invoice_number: "42",
+        status: "UNPAID",
+        created_at: "2026-07-10T14:30:00Z",
+        updated_at: "2026-07-10T14:30:00Z",
+        primary_recipient: {
+          given_name: "Saddam",
+          family_name: "Saleh",
+          email_address: "saddam@example.com",
+        },
+        payment_requests: [{ computed_amount_money: { amount: 112500 } }],
+      },
+      { leadId: "lead1", status: "UNPAID" },
+      new Map([["lead1", "Saddam Saleh"]]),
+    );
+    expect(row).toEqual({
+      number: "42",
+      status: "UNPAID",
+      dollars: 1125,
+      recipient: "Saddam Saleh",
+      recipient_email: "saddam@example.com",
+      sent: "Jul 10, 2026, 9:30 AM",
+      updated: "Jul 10, 2026, 9:30 AM",
+      matched_lead: "Saddam Saleh [lead1]",
+    });
+  });
+  it("handles no marker / no recipient / no amount", () => {
+    const row = invoiceRow({ id: "inv_2" }, null, new Map());
+    expect(row).toEqual({
+      number: "inv_2",
+      status: "UNKNOWN",
+      dollars: 0,
+      sent: "unknown",
+      updated: "unknown",
+      matched_lead: "no lead matched",
+    });
   });
 });

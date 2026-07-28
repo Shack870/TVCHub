@@ -74,12 +74,12 @@ const lc = (s: unknown): string => String(s ?? "").toLowerCase().trim();
 const normalizeText = (s: unknown): string =>
   lc(s).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 
-interface SqMoney {
+export interface SqMoney {
   amount?: number; // smallest currency unit (cents for USD)
   currency?: string;
 }
 
-interface SqPayment {
+export interface SqPayment {
   id: string;
   status: string; // COMPLETED | APPROVED | PENDING | CANCELED | FAILED
   created_at: string;
@@ -103,14 +103,14 @@ interface SqCustomer {
 // an invoice payment shows up there too, and the payment matcher is the one
 // source of truth for crediting dollars.
 
-interface SqInvoiceRecipient {
+export interface SqInvoiceRecipient {
   given_name?: string;
   family_name?: string;
   email_address?: string;
   phone_number?: string;
 }
 
-interface SqInvoice {
+export interface SqInvoice {
   id: string;
   invoice_number?: string;
   title?: string;
@@ -126,7 +126,7 @@ interface SqInvoice {
   payment_requests?: { computed_amount_money?: SqMoney }[];
 }
 
-async function fetchInvoices(token: string): Promise<SqInvoice[]> {
+export async function fetchInvoices(token: string): Promise<SqInvoice[]> {
   // Full list every run (the ListInvoices API has no updated-since filter and
   // the location carries a dozen or so). Marker docs keyed on status make the
   // re-walk cheap: an invoice is only re-processed when its status CHANGES.
@@ -158,13 +158,21 @@ function sqHeaders(token: string): Record<string, string> {
   };
 }
 
-async function fetchPayments(token: string, beginTime: string): Promise<SqPayment[]> {
+// endTime is optional: the scheduled sync walks forward from beginTime to
+// "now"; the askPostIt payment-search tool passes a bounded window.
+export async function fetchPayments(
+  token: string,
+  beginTime: string,
+  endTime?: string,
+): Promise<SqPayment[]> {
   const payments: SqPayment[] = [];
   let cursor = "";
   do {
     const url =
       `${SQUARE}/payments?location_id=${LOCATION_ID}` +
-      `&begin_time=${encodeURIComponent(beginTime)}&sort_order=ASC&limit=100` +
+      `&begin_time=${encodeURIComponent(beginTime)}` +
+      (endTime ? `&end_time=${encodeURIComponent(endTime)}` : "") +
+      `&sort_order=ASC&limit=100` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
     const res = await fetch(url, { headers: sqHeaders(token) });
     if (!res.ok) throw new Error(`Square payments ${res.status}: ${await res.text()}`);
