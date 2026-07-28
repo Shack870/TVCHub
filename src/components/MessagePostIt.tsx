@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import type { TvcMessage } from '../types';
-import { isBillingNote, isSystemNote } from '../lib/notes';
+import type { Lead, TvcMessage } from '../types';
+import { isBillingNote, isSystemNote, resolveNoteLead } from '../lib/notes';
 import { archiveMessage, setMessageHandled } from '../lib/db';
 import { useAuth } from '../context/AuthContext';
+import { useLeads } from '../store/useLeads';
+import { useUI } from '../store/useUI';
 import { Modal } from './ui/Modal';
 import { AskPostItDrawer } from './AskPostItDrawer';
 
@@ -30,14 +32,41 @@ function RingingPhone({ still = false }: { still?: boolean }) {
 }
 
 // Tappable phone/email chips. stopPropagation so tapping a number doesn't
-// open the note's modal (or trigger a flip).
-function ContactChips({ msg, dark = false }: { msg: TvcMessage; dark?: boolean }) {
-  if (!msg.phone && !msg.email) return null;
+// open the note's modal (or trigger a flip). When the note resolves to a
+// client in the system, an "Open file" chip jumps straight to their detail
+// drawer (onNavigate lets a hosting modal close itself first).
+function ContactChips({
+  msg,
+  lead,
+  onNavigate,
+  dark = false,
+}: {
+  msg: TvcMessage;
+  lead?: Lead | null;
+  onNavigate?: () => void;
+  dark?: boolean;
+}) {
+  const selectLead = useUI((s) => s.selectLead);
+  if (!msg.phone && !msg.email && !lead) return null;
   const cls = dark
     ? 'rounded-full bg-white/20 px-2 py-0.5 font-type text-[10px] font-bold text-white hover:bg-white/30'
     : 'rounded-full bg-black/10 px-2 py-0.5 font-type text-[10px] font-bold text-yellow-950 hover:bg-black/20';
   return (
     <span className="mt-2 flex flex-wrap gap-1.5">
+      {lead && (
+        <button
+          type="button"
+          title={`Open ${lead.name}'s file`}
+          className={`${cls} max-w-full truncate`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onNavigate?.();
+            selectLead(lead.id);
+          }}
+        >
+          📂 {lead.name}
+        </button>
+      )}
       {msg.phone && (
         <a
           href={`tel:${msg.phone.replace(/[^\d+]/g, '')}`}
@@ -69,6 +98,10 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
   const [flipped, setFlipped] = useState(false);
   const [askOpen, setAskOpen] = useState(false);
   const { user } = useAuth();
+
+  // If the note is about a client we have on file, link straight to them.
+  const leads = useLeads();
+  const noteLead = useMemo(() => resolveNoteLead(msg, leads), [msg, leads]);
 
   // System notes get the "Ask" follow-up chat — there's real data behind them
   // (a lead file, call analyses, Square records) for the assistant to ground
@@ -172,7 +205,7 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           {noPursuit && msg.subject ? `${msg.subject}. ` : ''}
           {msg.message}
         </p>
-        <ContactChips msg={msg} />
+        <ContactChips msg={msg} lead={noteLead} />
         {askable && (
           <button
             type="button"
@@ -295,7 +328,7 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
             <p className="mt-2 font-hand text-xl leading-snug text-blue-950">
               {msg.nonPaymentReason}
             </p>
-            <ContactChips msg={msg} />
+            <ContactChips msg={msg} lead={noteLead} />
           </div>
         )}
 
@@ -367,7 +400,7 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
               </p>
             </div>
           )}
-          <ContactChips msg={msg} />
+          <ContactChips msg={msg} lead={noteLead} onNavigate={() => setOpen(false)} />
           <div className="mt-6 flex items-center justify-between gap-2">
             <div className="flex items-center gap-1">
               {askable && (
