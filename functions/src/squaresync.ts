@@ -15,6 +15,14 @@ import { stampHeartbeat } from "./heartbeat.js";
 //     fields (paid_full / paid_partial with a running squarePaidTotal), moves
 //     paid-in-full leads to intake_complete, and clears any open
 //     billing-escalation post-its — the money arrived, stand the alarm down.
+//     When the lead has NO recorded fee, the sync no longer blindly declares
+//     paid_full: it infers the fee (a "Balance" figure in the payment note →
+//     the standard $1,125 → a fee quoted on the lead's call transcripts).
+//     A payment ≈ the fee → paid_full as before; ≈ HALF the fee → the firm's
+//     standard two-payment plan (paid_partial, financing stamp with the
+//     balance due in 30 days, Financed board — never intake_complete) plus a
+//     confirm-the-terms post-it; an odd amount is credited as paid_partial
+//     with no invented fee, stage untouched, and a set-the-fee post-it.
 //   - a payment matching nobody is ignored SILENTLY (marker doc only). The
 //     Square account also takes general law-firm charges and payments from
 //     clients who never came through the app, so unmatched money is not the
@@ -153,6 +161,80 @@ export const classifyVerifyCandidate = (opts: {
   if (nameHit && amountConsistent) return "strong";
   if (nameHit || amountMatches) return "weak";
   return "none";
+};
+
+// --- Unknown-fee payment inference -----------------------------------------
+// When a payment lands on a lead with NO recorded saleAmount, the old rule
+// ("no fee to compare against → call it paid in full") graduated half-payments
+// to intake_complete (the Michael Harris case: $562 of a $1,125 two-payment
+// plan declared "nothing else to collect"). The corpus says $562/$563 is the
+// firm's standard HALF payment — half of the standard $1,125 fee (Pierre
+// Washington, Moise Kumbuka, Harris). So with no fee on the card the sync now
+// infers one before deciding full vs partial:
+//   1. a "Balance" figure in the payment note is authoritative — the fee is
+//      what was paid plus what the note says is still owed;
+//   2. the standard $1,125 fee (full or half match, ±$5);
+//   3. a fee quoted on the lead's call transcripts (ai.saleAmount, newest
+//      first) — checked LAST because the classifier stores "quoted or
+//      collected", and a stored half-collection would otherwise make the half
+//      payment look like payment-in-full.
+// A payment matching nothing is credited (squarePaidTotal) as paid_partial
+// with NO invented fee, stage untouched, and a human sets the real fee.
+export const STANDARD_FEE_DOLLARS = 1125;
+
+export interface UnknownFeeDecision {
+  kind: "full" | "half" | "odd";
+  // The fee the decision rests on (stamped onto the lead for full/half).
+  fee: number | null;
+  feeSource: "balance_note" | "standard" | "call_analysis" | null;
+}
+
+// "Balance=$563.00" / "balance: 563" in the payment note → fee = paid + owed.
+export const inferFeeFromNote = (note: unknown, paidDollars: number): number | null => {
+  const m = /balance\s*(?:=|:|is|of)?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i.exec(String(note ?? ""));
+  if (!m) return null;
+  const balance = Number(m[1].replace(/,/g, ""));
+  return Number.isFinite(balance) && balance > 0 ? paidDollars + balance : null;
+};
+
+// The newest CallRail attempt whose transcript analysis carried a dollar
+// figure (the quoted/collected fee field of the classifier schema).
+export const inferFeeFromCallAnalyses = (
+  attempts: { via?: unknown; ts?: unknown; ai?: { saleAmount?: unknown } | null }[],
+): number | null => {
+  let best: { ts: number; fee: number } | null = null;
+  for (const a of attempts) {
+    if (a?.via !== "callrail") continue;
+    const fee = a.ai?.saleAmount;
+    const ts = typeof a.ts === "number" ? a.ts : 0;
+    if (typeof fee === "number" && fee > 0 && (!best || ts > best.ts)) {
+      best = { ts, fee };
+    }
+  }
+  return best?.fee ?? null;
+};
+
+export const decideUnknownFeePayment = (opts: {
+  paymentDollars: number;
+  note?: string | null;
+  attempts?: { via?: unknown; ts?: unknown; ai?: { saleAmount?: unknown } | null }[];
+}): UnknownFeeDecision => {
+  const p = opts.paymentDollars;
+  const candidates: { fee: number; source: UnknownFeeDecision["feeSource"] }[] = [];
+  const noteFee = inferFeeFromNote(opts.note, p);
+  if (noteFee) candidates.push({ fee: noteFee, source: "balance_note" });
+  candidates.push({ fee: STANDARD_FEE_DOLLARS, source: "standard" });
+  const aiFee = inferFeeFromCallAnalyses(opts.attempts ?? []);
+  if (aiFee) candidates.push({ fee: aiFee, source: "call_analysis" });
+  for (const c of candidates) {
+    if (Math.abs(p - c.fee) <= AMOUNT_TOLERANCE) {
+      return { kind: "full", fee: c.fee, feeSource: c.source };
+    }
+    if (Math.abs(p - c.fee / 2) <= AMOUNT_TOLERANCE) {
+      return { kind: "half", fee: c.fee, feeSource: c.source };
+    }
+  }
+  return { kind: "odd", fee: null, feeSource: null };
 };
 
 export interface SqMoney {
@@ -523,7 +605,18 @@ export const syncSquare = onSchedule(
       const paidTs = new Date(payment.created_at).getTime() || Date.now();
 
       let action = "payment_logged";
+      // Unknown-fee inference outcomes that need a human sanity check — set
+      // inside the transaction, post-its raised after it commits.
+      let halfPlanPostIt: {
+        leadName: string;
+        fee: number;
+        feeSource: string;
+        nextPaymentDue: string;
+      } | null = null;
+      let oddFeePostIt: { leadName: string } | null = null;
       await db.runTransaction(async (tx) => {
+        halfPlanPostIt = null; // reset on transaction retry
+        oddFeePostIt = null;
         const ref = db.collection("leads").doc(leadId);
         const snap = await tx.get(ref);
         if (!snap.exists) return;
@@ -568,8 +661,25 @@ export const syncSquare = onSchedule(
         patch.planStallFlaggedAt = null;
 
         const saleAmount = (d.saleAmount as number) ?? null;
-        const coversFee = !saleAmount || dollars >= saleAmount || paidTotal >= saleAmount;
         const alreadyPaidFull = d.saleStatus === "paid_full"; // never downgrade
+
+        // No fee on the card: infer one (balance note → standard $1,125 →
+        // call-transcript quote) before deciding full vs partial — a blind
+        // "no fee → paid in full" graduated the Harris half-payment to
+        // intake_complete. Known-fee leads keep the original rules exactly.
+        const decision =
+          !saleAmount && !alreadyPaidFull
+            ? decideUnknownFeePayment({
+                paymentDollars: dollars,
+                note: payment.note ?? null,
+                attempts,
+              })
+            : null;
+        if (decision?.fee) patch.saleAmount = decision.fee;
+
+        const coversFee = saleAmount
+          ? dollars >= saleAmount || paidTotal >= saleAmount
+          : decision?.kind === "full";
 
         if (coversFee || alreadyPaidFull) {
           patch.saleStatus = "paid_full";
@@ -600,16 +710,138 @@ export const syncSquare = onSchedule(
           } else {
             action = "paid_full";
           }
+        } else if (decision?.kind === "half") {
+          // HALF PAYMENT, fee inferred: this is the firm's standard
+          // two-payment plan ($562 now + $563 within 30 days on the $1,125
+          // fee). Record it as such — paid_partial with the inferred fee, a
+          // financing stamp with the balance due in 30 days, and the lead on
+          // (or staying on) the Financed board, NEVER intake_complete. A
+          // post-it asks a human to confirm the inferred terms.
+          patch.saleStatus = "paid_partial";
+          patch.saleStatusAt = paidTs;
+          patch.saleEscalatedAt = null;
+          patch.salePursuitAlertAt = null;
+          patch.isFinanced = true;
+          const prevFin = d.financing as { payments?: unknown[] } | undefined;
+          const nextPaymentDue = new Date(paidTs + 30 * 86400_000).toLocaleDateString(
+            "en-CA",
+            { timeZone: "America/Chicago" },
+          );
+          patch.financing = {
+            totalFee: decision.fee,
+            payments: Array.isArray(prevFin?.payments) ? prevFin.payments : [],
+            nextPaymentDue,
+          };
+          if (d.stage !== "financed" && d.stage !== "intake_complete") {
+            const day = new Date(paidTs).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              timeZone: "America/Chicago",
+            });
+            patch.stage = "financed";
+            patch.retainedAt = (d.retainedAt as number) ?? paidTs;
+            patch.autoStageNote =
+              `Stage moved to Financed by Square sync — ${amountLabel} received on ${day} ` +
+              `≈ half of the $${decision.fee} fee (two-payment plan inferred)`;
+            patch.autoStageAt = now;
+          }
+          action = "paid_partial_half_plan";
+          halfPlanPostIt = {
+            leadName: (d.name as string) ?? "",
+            fee: decision.fee!,
+            feeSource: decision.feeSource!,
+            nextPaymentDue,
+          };
         } else {
           patch.saleStatus = "paid_partial";
           patch.saleStatusAt = paidTs;
           patch.saleEscalatedAt = null;
           patch.salePursuitAlertAt = null;
           action = "paid_partial";
+          // Odd amount on a lead with no fee: the money is credited
+          // (squarePaidTotal above) but no fee is invented and the stage is
+          // left alone — a human sets the real total fee.
+          if (decision?.kind === "odd") {
+            action = "paid_partial_unknown_fee";
+            oddFeePostIt = { leadName: (d.name as string) ?? "" };
+          }
         }
 
         tx.update(ref, patch);
       });
+
+      // Unknown-fee inference post-its — ONE per payment, ever (matched by
+      // squarePaymentId + subject, so an ambiguity/weak-candidate note on the
+      // same payment can't suppress them).
+      const raiseFeePostIt = async (subjectPrefix: string, subject: string, message: string) => {
+        const existing = await db
+          .collection("messages")
+          .where("squarePaymentId", "==", payment.id)
+          .get();
+        if (
+          existing.docs.some((m) =>
+            String(m.data().subject ?? "").startsWith(subjectPrefix),
+          )
+        ) {
+          return;
+        }
+        await db.collection("messages").add({
+          kind: "tvc_message",
+          source: "system",
+          from: "Square Sync",
+          fromName: "Square Sync",
+          subject,
+          message,
+          tvcCaseNumber: null,
+          memberName: halfPlanPostIt?.leadName ?? oddFeePostIt?.leadName ?? null,
+          leadId,
+          phone: null,
+          email: null,
+          gmailMessageId: null,
+          squarePaymentId: payment.id,
+          receivedAt: paidTs,
+          handled: false,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      };
+      if (halfPlanPostIt) {
+        const hp = halfPlanPostIt as {
+          leadName: string;
+          fee: number;
+          feeSource: string;
+          nextPaymentDue: string;
+        };
+        const sourceLabel =
+          hp.feeSource === "balance_note"
+            ? "the payment note's Balance figure"
+            : hp.feeSource === "call_analysis"
+              ? "the fee quoted on their call transcript"
+              : "the firm's standard $1,125 fee";
+        await raiseFeePostIt(
+          "Half payment detected",
+          `Half payment detected — confirm plan terms — ${hp.leadName}`,
+          `${hp.leadName} paid ${amountLabel} (payment ${payment.id}) with no fee recorded ` +
+            `on their card. That is ≈ half of the $${hp.fee} fee (inferred from ${sourceLabel}), ` +
+            `so the sync recorded a two-payment plan: saleStatus paid_partial, saleAmount ` +
+            `$${hp.fee}, balance due by ${hp.nextPaymentDue}, lead on the Financed board.\n` +
+            `Sanity-check the plan terms with the agent/call recording and correct the card ` +
+            `if this read is wrong.`,
+        );
+      }
+      if (oddFeePostIt) {
+        const op = oddFeePostIt as { leadName: string };
+        await raiseFeePostIt(
+          "Payment credited, fee unknown",
+          `Payment credited, fee unknown — set the total fee — ${op.leadName}`,
+          `${op.leadName} paid ${amountLabel} (payment ${payment.id}), but their card has no ` +
+            `recorded fee and the amount matches neither the standard $1,125 fee (full or half) ` +
+            `nor anything inferred from their calls or the payment note. The money is credited ` +
+            `(paid_partial, squarePaidTotal rolled up) with NO fee invented and the stage left ` +
+            `alone.\nSet the total fee on the card (saleAmount) so future payments reconcile ` +
+            `correctly.`,
+        );
+      }
 
       // The money arrived — stand down any open billing-escalation post-its.
       const escalations = await db

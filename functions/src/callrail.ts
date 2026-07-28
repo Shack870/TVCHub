@@ -32,6 +32,12 @@ import { hardDeclineMove } from "./noSaleRouting.js";
 //      lost, never on a call older than the lost stamp). Soft declines
 //      (price, thinking, wants evidence) stay on the board.
 // Human-set retained/financed/intake_complete/lost stages are never overridden.
+//
+// ANALYSIS IS NEVER DROPPED: a connected call's transcript analysis either
+// attaches when the call is processed, or — when the transcript isn't ready
+// yet / the classifier call fails — the marker is stamped analysisPending and
+// the late-attach pass re-checks it every run until the analysis lands (with
+// the same guarded outcome/stage/sale consequences the live path applies).
 
 const CALLRAIL_API_KEY = defineSecret("CALLRAIL_API_KEY");
 const OPENAI_API_KEY_CR = defineSecret("OPENAI_API_KEY");
@@ -280,6 +286,102 @@ function fmtDuration(sec: number | null): string {
   return m ? `${m}m ${s}s` : `${s}s`;
 }
 
+// --- Deferral & late analysis attachment ------------------------------------
+// CallRail exposes calls the moment they START and fills duration → recording
+// → transcription asynchronously over the following minutes. Processing a
+// call before those settle logs a bare attempt, and the marker doc blocks
+// every retry. Two layers of defense:
+//   1. deferReason: fresh calls that are still settling are skipped WITHOUT a
+//      marker so a later run sees the final record.
+//   2. analysisPending markers: when an attempt IS logged without an `ai` map
+//      on a call that should have produced one (transcript still missing
+//      after the deferral window, or the OpenAI call itself failed — the
+//      Michael Harris case, where a quota error at process time silently
+//      dropped the analysis of a 15-minute sale call), the marker is stamped
+//      analysisPending and the late-attach pass below re-checks it every run
+//      until the analysis lands or the call ages out.
+
+// How long a fresh call may defer (no marker) waiting to settle.
+const DEFER_WINDOW_MS = 3 * 3600_000;
+// An answered call at least this long is expected to produce a transcript —
+// don't require recording_duration, which CallRail publishes LATE (a call
+// processed right after hangup has duration but no recording metadata yet).
+export const TRANSCRIPT_EXPECTED_MIN_SEC = 30;
+// The late-attach pass gives up on markers older than this.
+const LATE_ATTACH_MAX_AGE_MS = 7 * 86400_000;
+
+// Why a fresh call must wait for the next run (or null = process it now).
+export function deferReason(
+  call: Pick<
+    CrCall,
+    "answered" | "duration" | "recording_duration" | "transcription" | "start_time"
+  >,
+  now: number,
+): "in_progress" | "transcript_pending" | null {
+  const startedAt = new Date(call.start_time).getTime() || now;
+  if (now - startedAt >= DEFER_WINDOW_MS) return null; // stop waiting — log it
+  // Still ringing / in progress: duration is null until the call ends.
+  if (call.duration == null) return "in_progress";
+  // Answered call that should produce a transcript but hasn't yet. Either the
+  // recording exists and transcription is still running, or the call just
+  // ended and even the recording metadata hasn't been published (the old
+  // Boolean(recording_duration) gate missed that window and logged bare
+  // attempts the marker then froze forever).
+  if (
+    call.answered &&
+    (Boolean(call.recording_duration) || (call.duration ?? 0) >= TRANSCRIPT_EXPECTED_MIN_SEC) &&
+    (!call.transcription || call.transcription.length <= 40)
+  ) {
+    return "transcript_pending";
+  }
+  return null;
+}
+
+// Rebuild an already-logged attempt with a late-arriving analysis: the ai map
+// lands, the outcome is upgraded to the classifier's read, and the factual
+// note/duration/recording fields are refreshed from the final call record.
+// Pure — the caller owns the transaction.
+export function lateAnalysisAttemptUpdate(
+  attempt: Record<string, unknown>,
+  call: CrCall,
+  analysis: CallAnalysis,
+): { attempt: Record<string, unknown>; outcome: string } {
+  const outcome = outcomeFor(call, analysis);
+  const dir = call.direction === "inbound" ? "Inbound" : "Outbound";
+  const dur = fmtDuration(call.duration);
+  let notes = `${dir} call via CallRail${dur ? ` — ${dur}` : ""}.`;
+  if (analysis.connection === "wrong_number") {
+    notes += " ⚠ Sounded like a wrong number — verify the phone on file.";
+  }
+  return {
+    attempt: {
+      ...attempt,
+      outcome,
+      notes,
+      recordingUrl: call.recording_player || null,
+      durationSec: call.duration ?? null,
+      ai: analysis as unknown as Record<string, unknown>,
+    },
+    outcome,
+  };
+}
+
+// Single-call fetch for the late-attach pass (the incremental list may no
+// longer cover the call by the time its transcript shows up).
+async function fetchCallById(apiKey: string, id: string): Promise<CrCall | null> {
+  const fields =
+    "id,direction,answered,voicemail,duration,customer_phone_number,customer_name,start_time,recording_player,recording_duration,transcription";
+  const res = await fetch(
+    `https://api.callrail.com/v3/a/${CALLRAIL_ACCOUNT}/calls/${id}.json?fields=${fields}`,
+    { headers: { Authorization: `Token token="${apiKey}"` } },
+  );
+  if (!res.ok) {
+    logger.warn(`CallRail call ${id} lookup failed: ${res.status}`);
+    return null;
+  }
+  return (await res.json()) as CrCall;
+}
+
 async function fetchRecentCalls(apiKey: string): Promise<CrCall[]> {
   // A 48h window re-covers outages; already-processed calls are skipped via
   // marker docs, so overlap is harmless.
@@ -390,6 +492,308 @@ async function clearMissedCallPostIts(
   return cleared;
 }
 
+// Analysis-driven side effects shared by the live sync path and the
+// late-attach pass — both MUST behave identically, whether the analysis
+// arrived with the call or hours later: the possible-existing-client post-it,
+// the collect-now follow-up on a fresh verbal yes, the agreed-callback
+// follow-up, and the upset-caller post-it. Returns how many post-its landed.
+async function analysisSideEffects(
+  db: ReturnType<typeof getFirestore>,
+  opts: {
+    lead: { id: string; name: string; phone: string | null; email: string | null };
+    call: CrCall;
+    analysis: CallAnalysis;
+    startedAt: number;
+    flaggedExistingClient: boolean;
+  },
+): Promise<number> {
+  const { lead, call, analysis, startedAt, flaggedExistingClient } = opts;
+  let postIts = 0;
+  const dir = call.direction === "inbound" ? "Inbound" : "Outbound";
+
+  // Possible existing client flagged in the transaction — put the
+  // verification ask on the desk (same Action Item treatment as the cadence
+  // engine's notes).
+  if (flaggedExistingClient) {
+    await db.collection("messages").add({
+      kind: "tvc_message",
+      source: "system",
+      from: "CallRail Sync",
+      fromName: "CallRail Sync",
+      subject: `Possible existing client — ${lead.name}`,
+      message:
+        `Possible existing client — ${lead.name} called for a case status update; ` +
+        `verify retention before sales outreach.\n` +
+        `The app still has them as an unsold prospect, so the retention may have happened ` +
+        `outside the app's view (check with the firm / Square). Sales chasing is PAUSED ` +
+        `until this is resolved — mark the sale (or clear the flag) to resume.\n` +
+        `What the call said: ${analysis.summary}` +
+        (call.recording_player ? `\nListen: ${call.recording_player}` : ""),
+      tvcCaseNumber: null,
+      memberName: lead.name,
+      leadId: lead.id,
+      phone: lead.phone || call.customer_phone_number || null,
+      email: lead.email,
+      gmailMessageId: null,
+      callrailCallId: call.id,
+      receivedAt: startedAt,
+      handled: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    postIts++;
+    logger.info("Flagged possible existing client; sales cadence paused", {
+      leadId: lead.id,
+      name: lead.name,
+      callId: call.id,
+    });
+  }
+
+  // A fresh verbal yes goes straight onto the billing track: collect while
+  // the commitment is hot instead of waiting for tomorrow's sweep.
+  if (analysis.saleStatus === "promised_unpaid") {
+    await ensureFollowUp(db, lead.id, {
+      dueAt: Date.now(),
+      note:
+        `Collect payment — said YES on the call` +
+        (analysis.saleAmount ? ` ($${analysis.saleAmount} promised)` : "") +
+        (analysis.paymentPromise ? ` — "${analysis.paymentPromise}"` : ""),
+      withinMs: 12 * 3600_000,
+      type: "billing",
+    });
+  }
+
+  // A specific callback day agreed on the call becomes a real follow-up so
+  // it lands on the calendar and the Today queue.
+  if (analysis.callbackAt && /^\d{4}-\d{2}-\d{2}$/.test(analysis.callbackAt)) {
+    const at = new Date(`${analysis.callbackAt}T09:00:00-05:00`).getTime();
+    if (at > Date.now() - 86400_000) {
+      await ensureFollowUp(db, lead.id, {
+        dueAt: at,
+        note: `Agreed callback (from call transcript)`,
+        withinMs: 12 * 3600_000,
+      });
+    }
+  }
+
+  // An upset caller is a fire — put it on the desk like a missed call.
+  if (analysis.upset) {
+    await db.collection("messages").add({
+      kind: "missed_call",
+      source: "system",
+      from: call.customer_phone_number || "",
+      fromName: lead.name,
+      subject: `Upset caller: ${lead.name}`,
+      message:
+        `⚠ The transcript of this ${dir.toLowerCase()} call sounds upset/frustrated.\n` +
+        `${analysis.summary}` +
+        (call.recording_player ? `\nListen: ${call.recording_player}` : ""),
+      tvcCaseNumber: null,
+      memberName: lead.name,
+      leadId: lead.id,
+      phone: lead.phone || call.customer_phone_number || null,
+      email: lead.email,
+      gmailMessageId: null,
+      callrailCallId: call.id,
+      receivedAt: startedAt,
+      handled: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    postIts++;
+  }
+
+  return postIts;
+}
+
+// The late-attach pass: every marker stamped analysisPending is a logged
+// attempt still missing its `ai` map. Re-fetch the call, and once the
+// transcript exists run the SAME classifier and apply the SAME consequences
+// the live path would have: analysis on the attempt, outcome upgraded to the
+// classifier's read, lastConnectedAt, sale rollup, the sanctioned stage moves
+// (payment-confirmed / hard-decline, both fully guarded), and the analysis
+// side effects. Markers clear on success; calls that never produce a
+// transcript age out after 7 days.
+async function attachDeferredAnalyses(
+  db: ReturnType<typeof getFirestore>,
+  crApiKey: string,
+  openaiKey: string,
+): Promise<{ attached: number; gaveUp: number }> {
+  const snap = await db
+    .collection("callrailCalls")
+    .where("analysisPending", "==", true)
+    .get();
+  let attached = 0;
+  let gaveUp = 0;
+  for (const m of snap.docs) {
+    const md = m.data();
+    const callId = m.id;
+    const startedAt = (md.startedAt as number) ?? (md.processedAt as number) ?? 0;
+    const giveUp = async (why: string) => {
+      await m.ref.update({
+        analysisPending: false,
+        analysisGaveUpAt: Date.now(),
+        analysisGaveUpWhy: why,
+      });
+      gaveUp++;
+      logger.info("Gave up attaching late analysis", { callId, why });
+    };
+    if (!md.leadId) {
+      await giveUp("no lead on the marker");
+      continue;
+    }
+    if (Date.now() - startedAt > LATE_ATTACH_MAX_AGE_MS) {
+      await giveUp("call aged out (7 days) with no transcript/analysis");
+      continue;
+    }
+
+    const call = await fetchCallById(crApiKey, callId);
+    if (!call) continue; // transient API failure — retry next run
+    const transcript = call.transcription ?? "";
+    if (transcript.length <= 40) {
+      // No transcript yet. A recording that never materialized on an
+      // hours-old call means none is coming.
+      if (!call.recording_duration && Date.now() - startedAt > DEFER_WINDOW_MS) {
+        await giveUp("call has no recording — no transcript will ever exist");
+      }
+      continue; // still transcribing — retry next run
+    }
+
+    const leadRef = db.collection("leads").doc(md.leadId as string);
+    const leadSnap = await leadRef.get();
+    if (!leadSnap.exists || leadSnap.data()?.deletedAt) {
+      await giveUp("lead missing or deleted");
+      continue;
+    }
+    const leadName = (leadSnap.data()?.name as string) ?? null;
+
+    const analysis = await analyzeTranscript(
+      transcript,
+      call.direction,
+      call.start_time,
+      openaiKey,
+      leadName,
+    );
+    if (!analysis) continue; // classifier failed again — retry next run
+
+    // Same heard-name reconciliation as the live path.
+    if (
+      analysis.callerName &&
+      leadName &&
+      nameVerdict(analysis.callerName, leadName) === "match" &&
+      analysis.callerName !== leadName
+    ) {
+      analysis.callerName = leadName;
+    }
+    if (leadName) {
+      const fixedSummary = correctNameInText(analysis.summary, leadName);
+      if (fixedSummary) analysis.summary = fixedSummary;
+    }
+
+    let outcome: string | null = null;
+    let movedTo: string | null = null;
+    let flaggedExistingClient = false;
+    let leadForEffects: {
+      id: string;
+      name: string;
+      phone: string | null;
+      email: string | null;
+    } | null = null;
+    await db.runTransaction(async (tx) => {
+      const snap2 = await tx.get(leadRef);
+      if (!snap2.exists) return;
+      const d = snap2.data()!;
+      if (d.deletedAt) return;
+      const attempts = Array.isArray(d.contactAttempts) ? d.contactAttempts : [];
+      const idx = attempts.findIndex(
+        (a: { callId?: string }) => a?.callId === callId,
+      );
+      if (idx < 0) return; // attempt vanished — marker cleared below either way
+      if (attempts[idx].ai) return; // someone already attached it — done
+      const callTs = (attempts[idx].ts as number) ?? startedAt;
+
+      const updated = lateAnalysisAttemptUpdate(attempts[idx], call, analysis);
+      outcome = updated.outcome;
+
+      // Same sanctioned consequences as the live path, same guards: the
+      // payment-confirmed move only leaves working-board stages, the hard
+      // decline only fires on unsold board leads, and the sale rollup only
+      // acts on evidence NEWER than what's already on the lead — a lead
+      // hand-corrected after the call (saleStatusAt at payment time) is
+      // left completely untouched.
+      const move = autoStageMove(d, analysis, callTs);
+      const lostMove = !move ? hardDeclineMove(d, analysis, callTs) : null;
+      const applied = move ?? lostMove;
+      const attemptFinal = applied
+        ? { ...updated.attempt, notes: `${updated.attempt.notes} → ${applied.note}.` }
+        : updated.attempt;
+      const patch: Record<string, unknown> = {
+        contactAttempts: attempts.map((a: unknown, i: number) =>
+          i === idx ? attemptFinal : a,
+        ),
+        updatedAt: Date.now(),
+      };
+      if (
+        analysis.existingClientInquiry &&
+        !move &&
+        !d.possibleExistingClientAt &&
+        !(typeof d.saleStatus === "string" && (d.saleStatus as string).startsWith("paid")) &&
+        AUTO_MOVE_FROM.includes(d.stage as string)
+      ) {
+        patch.possibleExistingClientAt = callTs;
+        flaggedExistingClient = true;
+      }
+      if (
+        CONVERSATION_OUTCOMES.includes(updated.outcome) &&
+        ((d.lastConnectedAt as number) ?? 0) < callTs
+      ) {
+        patch.lastConnectedAt = callTs;
+      }
+      const sale = saleRollup(d, analysis, callTs);
+      if (sale) Object.assign(patch, sale);
+      if (move) {
+        Object.assign(patch, move.patch);
+        movedTo = move.patch.stage as string;
+      } else if (lostMove) {
+        Object.assign(patch, lostMove.patch);
+        movedTo = "lost";
+      }
+      tx.update(leadRef, patch);
+      leadForEffects = {
+        id: leadRef.id,
+        name: (d.name as string) ?? "",
+        phone: (d.phone as string) || null,
+        email: (d.email as string) || null,
+      };
+    });
+
+    if (leadForEffects && outcome) {
+      await analysisSideEffects(db, {
+        lead: leadForEffects,
+        call,
+        analysis,
+        startedAt,
+        flaggedExistingClient,
+      });
+    }
+    await m.ref.update({
+      analysisPending: false,
+      analysisAttachedAt: Date.now(),
+      ...(outcome ? { action: outcome } : {}),
+    });
+    attached++;
+    logger.info("Attached late analysis to logged attempt", {
+      callId,
+      leadId: md.leadId,
+      outcome,
+      movedTo,
+      saleStatus: analysis.saleStatus,
+      summary: analysis.summary.slice(0, 120),
+    });
+  }
+  return { attached, gaveUp };
+}
+
 export const syncCallRail = onSchedule(
   {
     schedule: "every 5 minutes",
@@ -398,8 +802,26 @@ export const syncCallRail = onSchedule(
   },
   async () => {
     const db = getFirestore();
+
+    // Late-attach pass first: attempts logged on earlier runs that are still
+    // missing their analysis (analysisPending markers) get re-checked every
+    // run — quiet phones must not delay a transcript that just landed.
+    let late = { attached: 0, gaveUp: 0 };
+    try {
+      late = await attachDeferredAnalyses(
+        db,
+        CALLRAIL_API_KEY.value(),
+        OPENAI_API_KEY_CR.value(),
+      );
+    } catch (e) {
+      logger.warn("Late-analysis attach pass failed; continuing with the sync", e);
+    }
+
     const calls = await fetchRecentCalls(CALLRAIL_API_KEY.value());
     if (!calls.length) {
+      if (late.attached || late.gaveUp) {
+        logger.info("CallRail sync: quiet phones", { lateAttached: late.attached, lateGaveUp: late.gaveUp });
+      }
       await stampHeartbeat("syncCallRail"); // quiet phones still = healthy run
       return;
     }
@@ -469,23 +891,11 @@ export const syncCallRail = onSchedule(
       // the next run sees the settled record.
       if (missedInbound && Date.now() - startedAt < 10 * 60_000) continue;
 
-      // CallRail exposes calls the moment they START. A call still in
-      // progress reports duration=null and no recording — processing it now
-      // logs a bare attempt (no duration/recording/AI summary) and the marker
-      // doc blocks any retry. Skip fresh unfinished calls WITHOUT a marker so
-      // a later run sees the settled record.
-      const inProgress = call.duration == null && Date.now() - startedAt < 3 * 3600_000;
-
-      // CallRail transcribes recordings asynchronously — often minutes after
-      // the call ends. If an answered+recorded call has no transcript yet and
-      // is still fresh, skip it WITHOUT a marker so a later run picks it up
-      // with the transcript (and therefore an AI summary) attached.
-      const transcriptPending =
-        call.answered &&
-        Boolean(call.recording_duration) &&
-        (!call.transcription || call.transcription.length <= 40) &&
-        Date.now() - startedAt < 3 * 3600_000;
-      if (!missedInbound && (inProgress || transcriptPending)) continue;
+      // CallRail exposes calls the moment they START and fills the record in
+      // asynchronously (duration → recording → transcription). A fresh call
+      // that's still settling is skipped WITHOUT a marker so a later run sees
+      // the final record — see deferReason for the exact rules.
+      if (!missedInbound && deferReason(call, Date.now())) continue;
 
       if (missedInbound) {
         // Surface the callback on the desk instead of burying it in a log —
@@ -526,16 +936,27 @@ export const syncCallRail = onSchedule(
 
       // Read the transcript (when CallRail produced one) so the log entry says
       // what actually happened, not just that a call connected.
-      const analysis =
-        call.answered && call.transcription && call.transcription.length > 40
-          ? await analyzeTranscript(
-              call.transcription,
-              call.direction,
-              call.start_time,
-              OPENAI_API_KEY_CR.value(),
-              lead.name,
-            )
-          : null;
+      const transcriptReady = Boolean(
+        call.answered && call.transcription && call.transcription.length > 40,
+      );
+      const analysis = transcriptReady
+        ? await analyzeTranscript(
+            call.transcription!,
+            call.direction,
+            call.start_time,
+            OPENAI_API_KEY_CR.value(),
+            lead.name,
+          )
+        : null;
+
+      // The transcript exists but the classifier call itself failed (OpenAI
+      // outage/quota — the Michael Harris case: his 15-minute sale call was
+      // logged bare because one quota error at process time dropped the
+      // analysis and the marker froze it). While the call is fresh, skip
+      // WITHOUT a marker so the next run simply retries; past the window the
+      // attempt is logged bare and the analysisPending marker below hands the
+      // call to the late-attach pass.
+      if (transcriptReady && !analysis && Date.now() - startedAt < DEFER_WINDOW_MS) continue;
 
       // Heard-name reconciliation (belt and braces on top of the prompt
       // hint): a heard name that fuzzy-matches the lead's legal name gets the
@@ -664,54 +1085,16 @@ export const syncCallRail = onSchedule(
         });
       }
 
-      // Possible existing client flagged above — put the verification ask on
-      // the desk (same Action Item treatment as the cadence engine's notes).
-      if (flaggedExistingClient && analysis) {
-        await db.collection("messages").add({
-          kind: "tvc_message",
-          source: "system",
-          from: "CallRail Sync",
-          fromName: "CallRail Sync",
-          subject: `Possible existing client — ${lead.name}`,
-          message:
-            `Possible existing client — ${lead.name} called for a case status update; ` +
-            `verify retention before sales outreach.\n` +
-            `The app still has them as an unsold prospect, so the retention may have happened ` +
-            `outside the app's view (check with the firm / Square). Sales chasing is PAUSED ` +
-            `until this is resolved — mark the sale (or clear the flag) to resume.\n` +
-            `What the call said: ${analysis.summary}` +
-            (call.recording_player ? `\nListen: ${call.recording_player}` : ""),
-          tvcCaseNumber: null,
-          memberName: lead.name,
-          leadId: lead.id,
-          phone: lead.phone || call.customer_phone_number || null,
-          email: lead.email,
-          gmailMessageId: null,
-          callrailCallId: call.id,
-          receivedAt: startedAt,
-          handled: false,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
-        postIts++;
-        logger.info("Flagged possible existing client; sales cadence paused", {
-          leadId: lead.id,
-          name: lead.name,
-          callId: call.id,
-        });
-      }
-
-      // A fresh verbal yes goes straight onto the billing track: collect while
-      // the commitment is hot instead of waiting for tomorrow's sweep.
-      if (analysis?.saleStatus === "promised_unpaid") {
-        await ensureFollowUp(db, lead.id, {
-          dueAt: Date.now(),
-          note:
-            `Collect payment — said YES on the call` +
-            (analysis.saleAmount ? ` ($${analysis.saleAmount} promised)` : "") +
-            (analysis.paymentPromise ? ` — "${analysis.paymentPromise}"` : ""),
-          withinMs: 12 * 3600_000,
-          type: "billing",
+      // Analysis-driven side effects (existing-client post-it, collect-now
+      // follow-up, agreed callback, upset-caller post-it) — shared with the
+      // late-attach pass so late analyses behave identically.
+      if (analysis) {
+        postIts += await analysisSideEffects(db, {
+          lead,
+          call,
+          analysis,
+          startedAt,
+          flaggedExistingClient,
         });
       }
 
@@ -733,47 +1116,23 @@ export const syncCallRail = onSchedule(
         }
       }
 
-      // A specific callback day agreed on the call becomes a real follow-up so
-      // it lands on the calendar and the Today queue.
-      if (analysis?.callbackAt && /^\d{4}-\d{2}-\d{2}$/.test(analysis.callbackAt)) {
-        const at = new Date(`${analysis.callbackAt}T09:00:00-05:00`).getTime();
-        if (at > Date.now() - 86400_000) {
-          await ensureFollowUp(db, lead.id, {
-            dueAt: at,
-            note: `Agreed callback (from call transcript)`,
-            withinMs: 12 * 3600_000,
-          });
-        }
-      }
-
-      // An upset caller is a fire — put it on the desk like a missed call.
-      if (analysis?.upset) {
-        await db.collection("messages").add({
-          kind: "missed_call",
-          source: "system",
-          from: call.customer_phone_number || "",
-          fromName: lead.name,
-          subject: `Upset caller: ${lead.name}`,
-          message:
-            `⚠ The transcript of this ${dir.toLowerCase()} call sounds upset/frustrated.\n` +
-            `${analysis.summary}` +
-            (call.recording_player ? `\nListen: ${call.recording_player}` : ""),
-          tvcCaseNumber: null,
-          memberName: lead.name,
-          leadId: lead.id,
-          phone: lead.phone || call.customer_phone_number || null,
-          email: lead.email,
-          gmailMessageId: null,
-          callrailCallId: call.id,
-          receivedAt: startedAt,
-          handled: false,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
-        postIts++;
-      }
-
-      await marker.set({ processedAt: Date.now(), leadId: lead.id, action: outcome });
+      // An attempt logged WITHOUT an ai map on a call that should produce one
+      // (transcript missing past the deferral window, or the classifier call
+      // failed past it) gets analysisPending stamped so the late-attach pass
+      // keeps trying until the analysis lands — the marker doc alone must
+      // never freeze a bare attempt again.
+      const analysisPending =
+        call.answered &&
+        !analysis &&
+        (transcriptReady ||
+          Boolean(call.recording_duration) ||
+          (call.duration ?? 0) >= TRANSCRIPT_EXPECTED_MIN_SEC);
+      await marker.set({
+        processedAt: Date.now(),
+        leadId: lead.id,
+        action: outcome,
+        ...(analysisPending ? { analysisPending: true, startedAt } : {}),
+      });
       logged++;
     }
 
@@ -781,6 +1140,8 @@ export const syncCallRail = onSchedule(
       pulled: calls.length,
       attemptsLogged: logged,
       missedCallPostIts: postIts,
+      lateAnalysesAttached: late.attached,
+      lateAnalysesGaveUp: late.gaveUp,
     });
     await stampHeartbeat("syncCallRail");
   },

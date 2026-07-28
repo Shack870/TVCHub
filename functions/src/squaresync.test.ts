@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   MATCHER_VERSION,
+  STANDARD_FEE_DOLLARS,
   classifyVerifyCandidate,
+  decideUnknownFeePayment,
+  inferFeeFromCallAnalyses,
+  inferFeeFromNote,
   isConnectedCallAttempt,
   nameNeedles,
 } from "./squaresync.js";
@@ -167,5 +171,112 @@ describe("classifyVerifyCandidate", () => {
         note: "Retainer payment",
       }),
     ).toBe("none");
+  });
+});
+
+describe("inferFeeFromNote", () => {
+  it("reads a Balance figure and adds it to the paid amount (fee = paid + owed)", () => {
+    // The Moise Kumbuka corpus case: $562 paid, note "Balance=$563.00".
+    expect(inferFeeFromNote("Moise Kumbuka Retainer Balance=$563.00", 562)).toBe(1125);
+    expect(inferFeeFromNote("balance: 800", 800)).toBe(1600);
+    expect(inferFeeFromNote("balance of $1,062.50", 562.5)).toBe(1625);
+  });
+
+  it("returns null when the note carries no balance", () => {
+    expect(inferFeeFromNote("Michael Harris Retainer Payment", 562)).toBeNull();
+    expect(inferFeeFromNote(null, 562)).toBeNull();
+    expect(inferFeeFromNote("Balance=$0", 562)).toBeNull();
+  });
+});
+
+describe("inferFeeFromCallAnalyses", () => {
+  it("takes the NEWEST callrail attempt carrying a classifier dollar figure", () => {
+    expect(
+      inferFeeFromCallAnalyses([
+        { via: "callrail", ts: 1, ai: { saleAmount: 900 } },
+        { via: "callrail", ts: 2, ai: { saleAmount: 1625 } },
+        { via: "square", ts: 3, ai: { saleAmount: 400 } }, // not a call — ignored
+        { via: "callrail", ts: 4, ai: null }, // no analysis — ignored
+      ]),
+    ).toBe(1625);
+  });
+
+  it("returns null when no call analysis carries an amount", () => {
+    expect(inferFeeFromCallAnalyses([{ via: "callrail", ts: 1 }])).toBeNull();
+    expect(inferFeeFromCallAnalyses([])).toBeNull();
+  });
+});
+
+describe("decideUnknownFeePayment", () => {
+  // The Michael Harris case: $562 charged on a lead with no saleAmount — the
+  // old rule declared him paid in full and graduated him to intake_complete
+  // with $563 still owed on a two-payment plan.
+  it("half: $562/$563 is the firm's standard HALF payment (half of $1,125)", () => {
+    for (const paid of [562, 562.5, 563]) {
+      expect(decideUnknownFeePayment({ paymentDollars: paid })).toEqual({
+        kind: "half",
+        fee: STANDARD_FEE_DOLLARS,
+        feeSource: "standard",
+      });
+    }
+  });
+
+  it("full: the standard fee (±$5 tolerance) stays paid_full as today", () => {
+    expect(decideUnknownFeePayment({ paymentDollars: 1125 })).toEqual({
+      kind: "full",
+      fee: 1125,
+      feeSource: "standard",
+    });
+    expect(decideUnknownFeePayment({ paymentDollars: 1127 }).kind).toBe("full");
+  });
+
+  it("balance note: fee = paid + Balance, and the note beats every other source", () => {
+    expect(
+      decideUnknownFeePayment({
+        paymentDollars: 562,
+        note: "Michael Harris Retainer Balance=$563.00",
+      }),
+    ).toEqual({ kind: "half", fee: 1125, feeSource: "balance_note" });
+    // Non-standard fee derived purely from the note.
+    expect(
+      decideUnknownFeePayment({ paymentDollars: 800, note: "first half, balance $800" }),
+    ).toEqual({ kind: "half", fee: 1600, feeSource: "balance_note" });
+  });
+
+  it("call-analysis quote: matches a non-standard quoted fee, full or half", () => {
+    const attempts = [{ via: "callrail", ts: 1, ai: { saleAmount: 1625 } }];
+    expect(decideUnknownFeePayment({ paymentDollars: 1625, attempts })).toEqual({
+      kind: "full",
+      fee: 1625,
+      feeSource: "call_analysis",
+    });
+    expect(decideUnknownFeePayment({ paymentDollars: 812, attempts })).toEqual({
+      kind: "half",
+      fee: 1625,
+      feeSource: "call_analysis",
+    });
+  });
+
+  it("a stored half-COLLECTION can't fake payment-in-full (standard half wins)", () => {
+    // The classifier stores "quoted or collected" — if it stored the $562
+    // actually collected, treating that as the fee would call the half
+    // payment full. The standard-fee check runs first, so $562 stays half.
+    expect(
+      decideUnknownFeePayment({
+        paymentDollars: 562,
+        attempts: [{ via: "callrail", ts: 1, ai: { saleAmount: 562 } }],
+      }),
+    ).toEqual({ kind: "half", fee: 1125, feeSource: "standard" });
+  });
+
+  it("odd: an amount matching nothing invents NO fee", () => {
+    expect(decideUnknownFeePayment({ paymentDollars: 400 })).toEqual({
+      kind: "odd",
+      fee: null,
+      feeSource: null,
+    });
+    expect(
+      decideUnknownFeePayment({ paymentDollars: 250, note: "court fee" }).kind,
+    ).toBe("odd");
   });
 });
