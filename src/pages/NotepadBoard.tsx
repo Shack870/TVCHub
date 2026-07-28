@@ -42,7 +42,7 @@ function appearedAt(l: Lead): number {
 
 function matches(l: Lead, q: string): boolean {
   if (!q) return true;
-  const hay = [l.name, l.phone, l.tvcCaseNumber, l.courtName, l.county, l.charge]
+  const hay = [l.name, l.phone, l.email, l.tvcCaseNumber, l.courtName, l.county, l.charge]
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
@@ -177,7 +177,11 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
 
   const board = useMemo(() => {
     const inScope = scope === 'initial' ? isInitialLead : isPipelineLead;
-    const list = leads.filter(inScope).filter((l) => matches(l, query));
+    // An active search hunts EVERYWHERE — every stage, both scopes. A person
+    // you're searching for by name/email/phone should never hide behind the
+    // Initial/Pipeline tab split (the Avtar Cheira lesson: his card sat in
+    // the Pipeline scope while the search ran in Initial and found nothing).
+    const list = (query ? leads : leads.filter(inScope)).filter((l) => matches(l, query));
     if (sort === 'court') return [...list].sort((a, b) => courtRank(a) - courtRank(b));
     if (sort === 'nextTouch') return [...list].sort((a, b) => nextTouchRank(a) - nextTouchRank(b));
     return [...list].sort((a, b) => appearedAt(b) - appearedAt(a));

@@ -165,6 +165,13 @@ export async function reviveLost(lead: Lead): Promise<void> {
   await updateLead(lead.id, { stage: 'callback', lostAt: null, lostRevivedAt: Date.now() });
 }
 
+// Resume sales chasing on a lead the existing-client detector paused
+// (possibleExistingClientAt). A human verified they are NOT already a client,
+// so the cadence may work them again.
+export async function clearExistingClientFlag(lead: Lead): Promise<void> {
+  await updateLead(lead.id, { possibleExistingClientAt: null });
+}
+
 // --- Ownership ---
 
 // Assign a lead to a named rep (chosen from the Claim Lead dropdown). The owner

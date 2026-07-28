@@ -23,6 +23,7 @@ import {
   declineLead,
   markCaseDismissed,
   markIntakeComplete,
+  clearExistingClientFlag,
   markLost,
   markSalePaid,
   recordPayment,
@@ -187,6 +188,22 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
             <p className="data mt-1 text-[11px] italic text-amber-200/80" title="Automatic stage move — audit trail">
               🤖 {lead.autoStageNote}
             </p>
+          )}
+          {lead.possibleExistingClientAt && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/60 bg-amber-400/15 px-3 py-2">
+              <p className="font-type text-xs font-semibold text-amber-200">
+                ⏸ Sales chasing paused — possible existing client (flagged{' '}
+                {new Date(lead.possibleExistingClientAt).toLocaleDateString()}). Verify retention:
+                mark the sale, or resume chasing.
+              </p>
+              <button
+                className="btn-ghost px-2 py-1 text-xs text-amber-100"
+                title="A human verified they are NOT already a client — resume normal sales cadence"
+                onClick={() => void clearExistingClientFlag(lead)}
+              >
+                Not a client — resume chasing
+              </button>
+            </div>
           )}
         </div>
         <div className="flex flex-col items-end gap-2">
