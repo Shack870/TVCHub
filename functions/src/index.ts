@@ -22,4 +22,5 @@ export { tvcThreadSync } from "./tvcthreads.js";
 export { syncSquare } from "./squaresync.js";
 export { cadenceSweep } from "./cadence.js";
 export { sendToPdfApp, autoSendToPdfApp, retryPdfHandoff } from "./pdfhandoff.js";
+export { askPostIt } from "./askPostIt.js";
 export { watchdog } from "./watchdog.js";

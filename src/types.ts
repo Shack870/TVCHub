@@ -353,6 +353,9 @@ export interface TvcMessage {
   handled: boolean;
   handledAt?: number | null;
   handledBy?: string | null;
+  // "Ask Question" follow-up chat on this note (see functions/src/askPostIt.ts).
+  // Appended server-side by the callable; the client only reads it.
+  qa?: { role: 'user' | 'assistant'; text: string; ts: number }[];
   createdAt: number;
   updatedAt: number;
   // Soft-delete: archived notes disappear from the desk but stay in the

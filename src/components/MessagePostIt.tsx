@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import type { TvcMessage } from '../types';
-import { isBillingNote } from '../lib/notes';
+import { isBillingNote, isSystemNote } from '../lib/notes';
 import { archiveMessage, setMessageHandled } from '../lib/db';
 import { useAuth } from '../context/AuthContext';
 import { Modal } from './ui/Modal';
+import { AskPostItDrawer } from './AskPostItDrawer';
 
 function fmtWhen(ms: number): string {
   const d = new Date(ms);
@@ -66,7 +67,13 @@ function ContactChips({ msg, dark = false }: { msg: TvcMessage; dark?: boolean }
 export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: number }) {
   const [open, setOpen] = useState(false);
   const [flipped, setFlipped] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
   const { user } = useAuth();
+
+  // System notes get the "Ask" follow-up chat — there's real data behind them
+  // (a lead file, call analyses, Square records) for the assistant to ground
+  // its answers in. Available whether or not the note is handled.
+  const askable = isSystemNote(msg);
 
   const missedCall = msg.kind === 'missed_call';
   // Uncollected-money escalation — gold, matching the SAID YES ribbon on cards.
@@ -166,6 +173,22 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           {msg.message}
         </p>
         <ContactChips msg={msg} />
+        {askable && (
+          <button
+            type="button"
+            title="Ask a question about this note"
+            onClick={(e) => {
+              e.stopPropagation();
+              setAskOpen(true);
+            }}
+            className="mt-2 flex items-center gap-1 rounded-full bg-black/10 px-2 py-0.5 font-type text-[10px] font-bold text-yellow-950 hover:bg-black/20"
+          >
+            💬 Ask
+            {(msg.qa?.length ?? 0) > 0 && (
+              <span className="opacity-60">({Math.ceil((msg.qa?.length ?? 0) / 2)})</span>
+            )}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -346,21 +369,32 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           )}
           <ContactChips msg={msg} />
           <div className="mt-6 flex items-center justify-between gap-2">
-            {/* Archiving takes the note off the desk for good; only offered
-                once it's handled so nothing open gets buried by accident. */}
-            {msg.handled ? (
-              <button
-                className="rounded-md px-3 py-2 font-type text-sm font-semibold text-yellow-950/60 hover:bg-black/10 hover:text-yellow-950"
-                onClick={() => {
-                  archiveMessage(msg.id);
-                  setOpen(false);
-                }}
-              >
-                Archive
-              </button>
-            ) : (
-              <span />
-            )}
+            <div className="flex items-center gap-1">
+              {askable && (
+                <button
+                  className="flex items-center gap-1.5 rounded-md px-3 py-2 font-type text-sm font-semibold text-yellow-950/70 hover:bg-black/10 hover:text-yellow-950"
+                  onClick={() => {
+                    setOpen(false);
+                    setAskOpen(true);
+                  }}
+                >
+                  💬 Ask
+                </button>
+              )}
+              {/* Archiving takes the note off the desk for good; only offered
+                  once it's handled so nothing open gets buried by accident. */}
+              {msg.handled && (
+                <button
+                  className="rounded-md px-3 py-2 font-type text-sm font-semibold text-yellow-950/60 hover:bg-black/10 hover:text-yellow-950"
+                  onClick={() => {
+                    archiveMessage(msg.id);
+                    setOpen(false);
+                  }}
+                >
+                  Archive
+                </button>
+              )}
+            </div>
             <div className="flex gap-2">
               <button
                 className={`rounded-md px-4 py-2 font-type text-sm font-semibold ${
@@ -392,6 +426,10 @@ export function MessagePostIt({ msg, index = 0 }: { msg: TvcMessage; index?: num
           </div>
         </div>
       </Modal>
+
+      {askable && (
+        <AskPostItDrawer msgId={msg.id} open={askOpen} onClose={() => setAskOpen(false)} />
+      )}
     </>
   );
 }
