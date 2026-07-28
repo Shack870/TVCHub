@@ -24,9 +24,9 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 type View = 'grid' | 'focus';
 type Sort = 'court' | 'newest' | 'nextTouch';
 type Scope = 'initial' | 'pipeline';
-// Pipeline-only lens on the stack. 'mostAttempts' keeps every card but
-// reorders by how many touches they've taken (the hardest chases first).
-type PipeFilter = 'all' | 'saidYes' | 'oneAttempt' | 'mostAttempts' | 'thinking';
+// Pipeline-only lens on the stack. 'mostAttempts' and 'soonestCourt' keep
+// every card but reorder it (hardest chases first / nearest court date first).
+type PipeFilter = 'all' | 'saidYes' | 'oneAttempt' | 'mostAttempts' | 'thinking' | 'soonestCourt';
 
 const attemptCount = (l: Lead) => l.contactAttempts?.length ?? 0;
 
@@ -215,6 +215,9 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
         return [...list].sort(
           (a, b) => attemptCount(b) - attemptCount(a) || appearedAt(b) - appearedAt(a),
         );
+      else if (pipeFilter === 'soonestCourt')
+        // Nearest court date first (overdue bubbles up); no-date files sink.
+        return [...list].sort((a, b) => courtRank(a) - courtRank(b));
     }
     if (sort === 'court') return [...list].sort((a, b) => courtRank(a) - courtRank(b));
     if (sort === 'nextTouch') return [...list].sort((a, b) => nextTouchRank(a) - nextTouchRank(b));
@@ -335,6 +338,7 @@ export function NotepadBoard({ embedded = false }: { embedded?: boolean }) {
           id: 'thinking',
           label: `Thinking It Over${pipeCounts.thinking ? ` (${pipeCounts.thinking})` : ''}`,
         },
+        { id: 'soonestCourt', label: 'Soonest Court' },
       ]}
       value={pipeFilter}
       onChange={(v) => {
