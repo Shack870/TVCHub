@@ -1,5 +1,8 @@
 import { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../firebase';
+import { notify } from '../store/useToast';
 import {
   addMonths,
   eachDayOfInterval,
@@ -419,6 +422,45 @@ function DayCardModal({
   const paper = 'linear-gradient(180deg, #fdf6cf 0%, #f7edb9 100%)';
   const docket = courts.length + open.length;
 
+  // "Intake Support Sheet" — ships the day's docket to the sales-assistant
+  // callable and renders the answer into the "Let's make some money" PDF
+  // (auto-downloads). Court preps, motions deadlines, and open follow-ups
+  // all ride along so the coach sees everything the day holds.
+  const [building, setBuilding] = useState(false);
+  const buildSheet = async () => {
+    if (building) return;
+    setBuilding(true);
+    try {
+      const docketItems = [
+        ...courts.map((lead) => ({
+          leadId: lead.id,
+          event: `Court appearance today${lead.nextCourtTime ? ` at ${lead.nextCourtTime}` : ''}${
+            lead.courtName ? ` — ${lead.courtName}` : ''
+          }`,
+        })),
+        ...motions.map(({ lead }) => ({
+          leadId: lead.id,
+          event: 'Motions-filing deadline today — last day to file the Motion to Continue',
+        })),
+        ...open.map(({ lead, f }) => ({
+          leadId: lead.id,
+          event: `Follow-up due: ${FOLLOWUP_LABEL[f.type]}${f.note ? ` — ${f.note}` : ''}`,
+        })),
+      ];
+      const fn = httpsCallable(functions, 'intakeSheet');
+      const res = await fn({ date: key, docket: docketItems });
+      const data = res.data as { ok: boolean; sheet: import('../lib/intakeSheetPdf').IntakeSheet };
+      // jsPDF loads on demand so it stays out of the main bundle.
+      const { downloadIntakeSheet } = await import('../lib/intakeSheetPdf');
+      downloadIntakeSheet(key, data.sheet);
+      notify.success('Intake Support Sheet downloaded — go make some money.');
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Could not build the sheet.');
+    } finally {
+      setBuilding(false);
+    }
+  };
+
   return (
     <Modal open={date !== null} onClose={onClose} width="max-w-md">
       <div style={{ perspective: '1200px' }}>
@@ -476,6 +518,25 @@ function DayCardModal({
                 </button>
               </div>
             </div>
+
+            {(docket > 0 || motions.length > 0) && (
+              <button
+                type="button"
+                disabled={building}
+                onClick={() => void buildSheet()}
+                title="AI game plan for today's docket — who to call, the angle, and what to say. Downloads as a PDF."
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 py-2 font-type text-sm font-bold text-white shadow-sm transition hover:bg-emerald-600 disabled:opacity-60"
+              >
+                {building ? (
+                  <>
+                    <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    Your assistant is working the file…
+                  </>
+                ) : (
+                  <>$ Intake Support Sheet</>
+                )}
+              </button>
+            )}
 
             {docket === 0 && motions.length === 0 && handled.length === 0 ? (
               <p className="-rotate-2 py-8 text-center font-hand text-2xl text-pad-ink/50">
