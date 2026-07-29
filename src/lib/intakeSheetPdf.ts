@@ -5,6 +5,7 @@ import { jsPDF } from 'jspdf';
 // (dynamic import) so jsPDF stays out of the main bundle.
 
 export interface SheetItem {
+  lead_id?: string;
   name: string;
   phone: string;
   event: string;
@@ -115,12 +116,13 @@ export function downloadIntakeSheet(dateKey: string, sheet: IntakeSheet): void {
     doc.setTextColor(...MONEY);
     doc.text(item.phone || '', PAGE_W - MARGIN, y, { align: 'right' });
     y += 14;
-    // event tag
+    // event tag — wrapped so long motions notes can't run off the page edge
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8.5);
     doc.setTextColor(...SOFT);
-    doc.text(item.event.toUpperCase(), MARGIN + 16, y);
-    y += 15;
+    const tag = doc.splitTextToSize(item.event.toUpperCase(), CONTENT_W - 16) as string[];
+    tag.slice(0, 2).forEach((ln, i) => doc.text(ln, MARGIN + 16, y + i * 11));
+    y += Math.min(tag.length, 2) * 11 + 6;
 
     para('Why today:', item.why_today);
     para('The angle:', item.angle);
