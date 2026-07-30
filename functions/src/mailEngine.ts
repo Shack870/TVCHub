@@ -572,12 +572,12 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
   @import url('https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400;1,700&display=swap');
   @page { size: letter; margin: 0.5in; }
   html, body { margin: 0; padding: 0; }
-  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 13px; color: #111; line-height: 1.5; }
+  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 12pt; color: #111; line-height: 1.5; }
 </style></head>
 <body>
   <img src="${LETTERHEAD_URL}" alt="${FIRM.name}"
        style="display:block; width:7in; margin:0 -0.25in 22px -0.25in;">
-  <p style="margin:0 0 14px 0;">${esc(todayHuman)}</p>
+  <p style="margin:0 0 14px 0; text-align:center; font-weight:bold;">${esc(todayHuman)}</p>
   <p style="margin:0 0 14px 0;">Dear ${esc(titleCaseName(v.name))},</p>
   ${body}
   <div style="margin:22px 0 0 3in;">
