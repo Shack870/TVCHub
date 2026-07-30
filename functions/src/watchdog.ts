@@ -57,6 +57,7 @@ const HEARTBEATS: { fn: string; cadence: string; maxAgeMs: number }[] = [
   { fn: "tvcThreadSync", cadence: "every 15 minutes", maxAgeMs: 2 * HOUR },
   { fn: "syncSquare", cadence: "every 15 minutes", maxAgeMs: 2 * HOUR },
   { fn: "cadenceSweep", cadence: "daily at 7:00 AM", maxAgeMs: 26 * HOUR },
+  { fn: "mailSweep", cadence: "daily at 6:30 AM", maxAgeMs: 26 * HOUR },
   { fn: "retryPdfHandoff", cadence: "hourly", maxAgeMs: 3 * HOUR },
 ];
 

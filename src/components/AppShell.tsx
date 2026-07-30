@@ -2,12 +2,14 @@ import { NavLink } from 'react-router-dom';
 import { type ReactNode } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useLeads, useLeadsStatus } from '../store/useLeads';
+import { useLetters } from '../store/useLetters';
 import { isActiveLead, isClient, isFinancingClient, isOnBoard, isPipelineLead } from '../lib/leadFlow';
 import { paymentPastDue } from '../lib/dates';
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { user, signOut } = useAuth();
   const leads = useLeads();
+  const letters = useLetters();
 
   const todayEnd = (() => {
     const d = new Date();
@@ -30,6 +32,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     financing: leads.filter(isFinancingClient).length,
     completed: leads.filter((l) => l.stage === 'intake_complete').length,
     noSale: leads.filter((l) => l.stage === 'lost').length,
+    mail: letters.filter((l) => l.status === 'proposed').length,
     followups: leads.reduce(
       (n, l) => n + (l.followUps?.filter((f) => !f.done).length ?? 0),
       0,
@@ -52,6 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Item to="/financing" label="Finance" count={counts.financing} icon="wallet" />
           <Item to="/completed" label="Intake Complete" count={counts.completed} icon="circle-check" />
           <Item to="/no-sale" label="No Sale" count={counts.noSale} icon="ban" />
+          <Item to="/mail" label="Mail Room" count={counts.mail} icon="mail" />
           <Item to="/reports" label="Reports" count={0} icon="bar-chart-3" />
           <Item to="/archived" label="Archived" count={0} icon="archive" />
         </nav>
@@ -88,6 +92,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Item to="/financing" label="Finance" count={counts.financing} icon="wallet" mobile />
           <Item to="/completed" label="Done" count={counts.completed} icon="circle-check" mobile />
           <Item to="/no-sale" label="No Sale" count={counts.noSale} icon="ban" mobile />
+          <Item to="/mail" label="Mail" count={counts.mail} icon="mail" mobile />
           <Item to="/reports" label="Reports" count={0} icon="bar-chart-3" mobile />
           <Item to="/archived" label="Archived" count={0} icon="archive" mobile />
           <Item to="/settings" label="Settings" count={0} icon="settings" mobile />

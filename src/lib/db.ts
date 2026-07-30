@@ -13,7 +13,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { notify } from '../store/useToast';
-import type { Lead, TvcMessage } from '../types';
+import type { Lead, Letter, TvcMessage } from '../types';
 
 const LEADS = 'leads';
 
@@ -83,6 +83,23 @@ export function watchMessages(
     (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) }) as TvcMessage)),
     (err) => {
       console.error('watchMessages error', err);
+      onError?.(errMsg(err));
+    },
+  );
+}
+
+// Physical-mail letters (PostGrid program) — read-only stream for the Mail
+// Room; all writes happen server-side (mailSweep / decideLetter).
+export function watchLetters(
+  cb: (letters: Letter[]) => void,
+  onError?: (msg: string) => void,
+): () => void {
+  const q = query(collection(db, 'letters'), orderBy('proposedAt', 'desc'), limit(300));
+  return onSnapshot(
+    q,
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) }) as Letter)),
+    (err) => {
+      console.error('watchLetters error', err);
       onError?.(errMsg(err));
     },
   );

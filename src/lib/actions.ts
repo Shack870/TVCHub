@@ -172,6 +172,17 @@ export async function clearExistingClientFlag(lead: Lead): Promise<void> {
   await updateLead(lead.id, { possibleExistingClientAt: null });
 }
 
+// The mail program's do-not-mail switch (functions/src/mailEngine.ts checks
+// it before every letter, propose and send alike).
+export async function setMailOptOut(lead: Lead, optOut: boolean): Promise<void> {
+  await updateLead(lead.id, { mailOptOut: optOut });
+}
+
+// A human fixed the address after a letter came back — reopen the mail track.
+export async function setMailReturnedCleared(lead: Lead): Promise<void> {
+  await updateLead(lead.id, { mailReturnedAt: null });
+}
+
 // --- Ownership ---
 
 // Assign a lead to a named rep (chosen from the Claim Lead dropdown). The owner

@@ -2,6 +2,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { useLeadsSubscription } from './store/useLeads';
 import { useMessagesSubscription } from './store/useMessages';
+import { useLettersSubscription } from './store/useLetters';
 import { AppShell } from './components/AppShell';
 import { LoginScreen } from './components/LoginScreen';
 import { HomeView } from './pages/HomeView';
@@ -12,6 +13,7 @@ import { CalendarView } from './pages/CalendarView';
 import { ArchivedView } from './pages/ArchivedView';
 import { ReportsView } from './pages/ReportsView';
 import { NoSaleList } from './pages/NoSaleList';
+import { MailRoom } from './pages/MailRoom';
 import { SettingsView } from './pages/SettingsView';
 import { LeadDetailDrawer } from './components/LeadDetailDrawer';
 import { FinancingModal } from './components/FinancingModal';
@@ -21,6 +23,7 @@ import { Toaster } from './components/ui/Toaster';
 function AuthedApp() {
   useLeadsSubscription(true);
   useMessagesSubscription(true);
+  useLettersSubscription(true);
   return (
     <BrowserRouter>
       <AppShell>
@@ -32,6 +35,7 @@ function AuthedApp() {
           <Route path="/completed" element={<CompletedList />} />
           <Route path="/archived" element={<ArchivedView />} />
           <Route path="/no-sale" element={<NoSaleList />} />
+          <Route path="/mail" element={<MailRoom />} />
           <Route path="/reports" element={<ReportsView />} />
           <Route path="/settings" element={<SettingsView />} />
         </Routes>

@@ -45,10 +45,12 @@ export interface ContactAttempt {
   outcome: ContactOutcome;
   notes?: string;
   by?: string; // user display name / uid
-  // Set by the CallRail / Gmail / Square syncs for auto-logged activity.
-  via?: 'callrail' | 'email' | 'square';
+  // Set by the CallRail / Gmail / Square syncs and the mail program for
+  // auto-logged activity.
+  via?: 'callrail' | 'email' | 'square' | 'mail';
   callId?: string;
   paymentId?: string; // Square payment id (via 'square')
+  letterId?: string; // letters/{id} doc (via 'mail')
   // Gmail message id (via 'email') — the TVC-thread sync's idempotency key
   // for timeline entries (functions/src/tvcthreads.ts).
   gmailMessageId?: string | null;
@@ -260,6 +262,11 @@ export interface Lead {
   // Audit trail for automatic stage moves (classifier-confirmed payments).
   autoStageNote?: string | null;
   autoStageAt?: number | null;
+  // Mail program (see functions/src/mail.ts). mailOptOut is the human
+  // do-not-mail switch; mailReturnedAt is stamped when a letter comes back
+  // undeliverable — both stop every letter until cleared.
+  mailOptOut?: boolean | null;
+  mailReturnedAt?: number | null;
 
   // --- Ownership ---
   owner?: string | null; // display label of the operator who owns this lead
@@ -312,6 +319,47 @@ export interface Lead {
   // Soft-delete: archived files are hidden from every view but kept in the
   // database so a mistaken delete can be undone.
   deletedAt?: number | null;
+}
+
+// A physical letter in the PostGrid mail program (see functions/src/mail.ts).
+// The daily mailSweep proposes; a human approves or skips in the Mail Room;
+// approval re-checks eligibility from live lead state and mails via PostGrid.
+export type LetterStatus =
+  | 'proposed' // waiting in the Mail Room review queue
+  | 'sent' // mailed (PostGrid accepted it)
+  | 'delivered' // PostGrid reports completed
+  | 'skipped' // a human said no
+  | 'blocked' // eligibility failed at re-check (retained, date moved, ...)
+  | 'returned'; // came back undeliverable — lead flagged mailReturnedAt
+
+export interface Letter {
+  id: string;
+  leadId: string;
+  leadName: string;
+  type:
+    | 'intro'
+    | 'second_chase'
+    | 'thinking'
+    | 'motions'
+    | 'motions_late'
+    | 'court_week'
+    | 'court_passed';
+  label: string; // human title of the letter
+  status: LetterStatus;
+  reason: string; // why the sweep proposed it
+  preview: string; // plain-text body preview
+  to: { line1: string; city: string; provinceOrState: string; postalOrZip: string };
+  blockedReason?: string | null;
+  proposedAt: number;
+  decidedAt?: number | null;
+  decidedBy?: string | null;
+  sentAt?: number | null;
+  postgridId?: string | null;
+  postgridStatus?: string | null;
+  previewUrl?: string | null;
+  testMode?: boolean;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface AppUser {

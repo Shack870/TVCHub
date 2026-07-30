@@ -35,6 +35,13 @@ service cloud.firestore {
              .hasOnly(['handled', 'handledAt', 'handledBy', 'deletedAt', 'updatedAt']);
     }
 
+    // Physical-mail letters (PostGrid program). Proposed by the mailSweep
+    // function; decided via the decideLetter callable (Admin SDK) — the app
+    // only ever reads them.
+    match /letters/{letterId} {
+      allow read: if firmUser();
+    }
+
     match /users/{uid} {
       allow read: if firmUser();
       allow write: if firmUser() && request.auth.uid == uid;

@@ -26,6 +26,8 @@ import {
   clearExistingClientFlag,
   markLost,
   markSalePaid,
+  setMailOptOut,
+  setMailReturnedCleared,
   recordPayment,
   reopenIntake,
   restoreLead,
@@ -205,6 +207,36 @@ function DrawerBody({ lead, onClose }: { lead: Lead; onClose: () => void }) {
               </button>
             </div>
           )}
+          {lead.mailReturnedAt && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-red-500/60 bg-red-400/15 px-3 py-2">
+              <p className="font-type text-xs font-semibold text-red-200">
+                ↩ Letter returned undeliverable — mail is stopped for this lead. Fix the address,
+                then resume.
+              </p>
+              <button
+                className="btn-ghost px-2 py-1 text-xs text-red-100"
+                title="Address has been corrected — the mail program may write to them again"
+                onClick={() => void setMailReturnedCleared(lead)}
+              >
+                Address fixed — resume mail
+              </button>
+            </div>
+          )}
+          <button
+            className={`mt-2 rounded-full px-2.5 py-1 font-type text-[10px] font-bold uppercase tracking-wide transition ${
+              lead.mailOptOut
+                ? 'bg-red-500/25 text-red-200 hover:bg-red-500/35'
+                : 'bg-white/10 text-manila/60 hover:bg-white/20'
+            }`}
+            title={
+              lead.mailOptOut
+                ? 'Do-not-mail is ON — the letter program will never write to them. Click to allow mail again.'
+                : 'Letters allowed — the mail program may propose letters for this lead. Click to stop all mail.'
+            }
+            onClick={() => void setMailOptOut(lead, !lead.mailOptOut)}
+          >
+            {lead.mailOptOut ? '✕ Do not mail' : '✉ Mail allowed'}
+          </button>
         </div>
         <div className="flex flex-col items-end gap-2">
           <button className="btn-ghost text-manila" onClick={onClose}>
@@ -1128,6 +1160,11 @@ function ContactLogTab({
                         {a.via === 'square' && (
                           <span className="rounded-full bg-emerald-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-emerald-800">
                             Square
+                          </span>
+                        )}
+                        {a.via === 'mail' && (
+                          <span className="rounded-full bg-amber-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase tracking-wide text-amber-800">
+                            ✉ Letter
                           </span>
                         )}
                       </span>
