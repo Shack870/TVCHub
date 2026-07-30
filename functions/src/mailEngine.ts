@@ -413,8 +413,10 @@ function keepThisBox(v: LetterVars, heading: string): string {
   </div>`;
 }
 
+// Body paragraphs: classic letter typesetting — half-inch first-line indent,
+// no gap between paragraphs beyond a small breath.
 function para(text: string): string {
-  return `<p style="margin:0 0 14px 0;">${text}</p>`;
+  return `<p style="margin:0 0 10px 0; text-indent:0.5in;">${text}</p>`;
 }
 
 // Per-letter body copy. Grounded, short sentences, one job: make them call.
@@ -521,23 +523,28 @@ function courtDate(v: LetterVars): string {
   return `${v.courtDate}${v.courtTime ? ` at ${v.courtTime}` : ""}`;
 }
 
-// Full letter HTML: letterhead, date, salutation, body, signature, and the
-// advertising-compliance footer. PostGrid stamps the recipient address into
-// the top of page one (addressPlacement top_first_page), so the layout
-// leaves that zone clear.
+// The firm letterhead image, hosted on the app's public Firebase site so
+// PostGrid's renderer can fetch it (public/letterhead.png in the repo).
+export const LETTERHEAD_URL = "https://tvchub-f2401.web.app/letterhead.png";
+
+// Full letter HTML: the firm's letterhead image centered at the top, then
+// date, salutation, body, signature, and the advertising-compliance footer.
+// Page geometry is fixed at US Letter (8.5×11") with 1-inch margins via
+// @page; body paragraphs carry a half-inch first-line indent (see para()).
+// The recipient address rides on PostGrid's separate address page
+// (addressPlacement insert_blank_page), so page one belongs entirely to
+// the letterhead design.
 export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: string): string {
   const body = letterBody(type, v);
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-  body { font-family: Georgia, 'Times New Roman', serif; font-size: 14px; color: #111; line-height: 1.5; }
+  @page { size: letter; margin: 1in; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #111; line-height: 1.5; }
 </style></head>
 <body>
-  <!-- PostGrid address window occupies the top of page 1 -->
-  <div style="height: 220px;"></div>
-  <div style="text-align:center; border-bottom: 3px double #14532d; padding-bottom: 10px; margin-bottom: 18px;">
-    <div style="font-size: 22px; font-weight: bold; letter-spacing: 1px; color: #14532d;">${FIRM.name.toUpperCase()}</div>
-    <div style="font-size: 11px;">${FIRM.line2} · ${FIRM.line1} · ${FIRM.city}, ${FIRM.state} ${FIRM.zip} · <b>${FIRM.phone}</b></div>
-  </div>
+  <img src="${LETTERHEAD_URL}" alt="${FIRM.name}"
+       style="display:block; margin:0 auto 22px auto; width:100%; max-width:6.5in;">
   <p style="margin:0 0 14px 0;">${esc(todayHuman)}</p>
   <p style="margin:0 0 14px 0;">Dear ${esc(titleCaseName(v.name))},</p>
   ${body}

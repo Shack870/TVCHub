@@ -346,7 +346,10 @@ export const decideLetter = onCall(
           html,
           color: false,
           doubleSided: false,
-          addressPlacement: "top_first_page",
+          // The letterhead image owns the top of page one, so the recipient
+          // address gets its own PostGrid-inserted address page (this is
+          // what shows through the envelope window).
+          addressPlacement: "insert_blank_page",
           description: `${LETTER_LABEL[type]} — ${str(lead.name)} [${str(L.leadId)}]`,
         }),
       });
