@@ -436,7 +436,7 @@ function referralLine(v: LetterVars): string {
 function notRetainedWarning(v: LetterVars, passed: boolean): string {
   const when = v.courtDate ? ` ON ${esc(courtDate(v)).toUpperCase()}` : "";
   const text = passed
-    ? `WE HAVE NOT BEEN RETAINED ON YOUR CASE, AND WE WILL NOT TAKE ANY ACTION ON YOUR BEHALF UNLESS YOU SIGN THE RETAINER AGREEMENT AND PAY THE LEGAL FEE.`
+    ? `We have not been retained on your case, and we will not take any action on your behalf unless properly retained.`
     : `WE HAVE NOT BEEN RETAINED ON YOUR CASE YET, AND WE WILL NOT APPEAR ON YOUR BEHALF${when}, UNLESS YOU SIGN THE RETAINER AGREEMENT AND PAY THE DISCOUNTED LEGAL FEE.`;
   return `<p style="margin:0 0 10px 0;"><b>${text}</b></p>`;
 }

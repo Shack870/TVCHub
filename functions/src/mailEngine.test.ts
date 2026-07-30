@@ -290,7 +290,7 @@ describe("rendering", () => {
       "WE HAVE NOT BEEN RETAINED ON YOUR CASE YET, AND WE WILL NOT APPEAR ON YOUR BEHALF ON MONDAY, AUGUST 24, 2026",
     );
     expect(renderLetterHtml("court_passed", vars, "Jul 30")).toContain(
-      "WE HAVE NOT BEEN RETAINED ON YOUR CASE, AND WE WILL NOT TAKE ANY ACTION ON YOUR BEHALF",
+      "We have not been retained on your case, and we will not take any action on your behalf unless properly retained.",
     );
     expect(renderLetterHtml("intro", vars, "Jul 30")).not.toContain("WE HAVE NOT BEEN RETAINED");
   });
