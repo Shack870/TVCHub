@@ -580,7 +580,7 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
   <p style="margin:0 0 14px 0; text-align:center; font-weight:bold;">${esc(todayHuman)}</p>
   <p style="margin:0 0 14px 0;">Dear ${esc(titleCaseName(v.name))},</p>
   ${body}
-  <div style="margin:22px 0 0 3in;">
+  <div style="margin:22px 0 0 3.75in; white-space:nowrap;">
     <p style="margin:0 0 2px 0;">Sincerely,</p>
     <p style="margin:0;"><b>${FIRM.signer}</b><br>${FIRM.signerTitle}, ${FIRM.name}<br><b>${FIRM.phone}</b></p>
   </div>

@@ -263,7 +263,7 @@ describe("rendering", () => {
       expect(html).toContain("padding: 0.5in 0.5in 0 0.5in");
       expect(html).toContain("text-indent:0.5in");
       expect(html).toContain("PT+Serif");
-      expect(html).toContain("margin:22px 0 0 3in");
+      expect(html).toContain("margin:22px 0 0 3.75in");
       expect(html).toContain("P.S.");
       const preview = letterPreviewText(t, vars);
       expect(preview.length).toBeGreaterThan(100);
