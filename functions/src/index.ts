@@ -24,5 +24,5 @@ export { cadenceSweep } from "./cadence.js";
 export { sendToPdfApp, autoSendToPdfApp, retryPdfHandoff } from "./pdfhandoff.js";
 export { askPostIt } from "./askPostIt.js";
 export { intakeSheet } from "./intakeSheet.js";
-export { mailSweep, decideLetter, previewLetter, saveLetterText } from "./mail.js";
+export { mailSweep, decideLetter, previewLetter, saveLetterText, clearLetterHistory } from "./mail.js";
 export { watchdog } from "./watchdog.js";

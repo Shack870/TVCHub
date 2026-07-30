@@ -427,6 +427,33 @@ export const previewLetter = onCall({ timeoutSeconds: 30 }, async (req) => {
   return { ok: true, html, bodyText };
 });
 
+// Clears the Mail Room's Skipped / Blocked history by deleting those letter
+// docs. Note the semantics: a deleted skip is a forgotten decision — the
+// sweep may legitimately re-propose that letter type for the lead later
+// (back into the review queue; nothing mails without approval).
+export const clearLetterHistory = onCall({ timeoutSeconds: 60 }, async (req) => {
+  if (!req.auth) throw new HttpsError("unauthenticated", "Sign in required.");
+  const db = getFirestore();
+  const snap = await db
+    .collection("letters")
+    .where("status", "in", ["skipped", "blocked"])
+    .get();
+  let deleted = 0;
+  // Firestore batches cap at 500 writes; the history list is far smaller,
+  // but chunk anyway so a big backlog can't fail the call.
+  const docs = snap.docs;
+  for (let i = 0; i < docs.length; i += 400) {
+    const batch = db.batch();
+    for (const d of docs.slice(i, i + 400)) {
+      batch.delete(d.ref);
+      deleted++;
+    }
+    await batch.commit();
+  }
+  logger.info("Letter history cleared", { deleted, by: req.auth.token.email ?? req.auth.uid });
+  return { ok: true, deleted };
+});
+
 // Saves reviewer edits to a proposed letter's text. Approval renders from
 // this text, so a saved edit is exactly what mails.
 export const saveLetterText = onCall({ timeoutSeconds: 30 }, async (req) => {

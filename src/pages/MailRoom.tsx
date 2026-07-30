@@ -64,6 +64,10 @@ export function MailRoom() {
   // Real letters cost real money — the button must be clicked twice.
   const [armed, setArmed] = useState(false);
   const armTimer = useRef<number | null>(null);
+  // Clear List (history tab): same two-click pattern, its own arm state.
+  const [clearArmed, setClearArmed] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const clearTimer = useRef<number | null>(null);
 
   const { proposed, sent, history } = useMemo(() => {
     const proposed = letters.filter((l) => l.status === 'proposed');
@@ -160,6 +164,32 @@ export function MailRoom() {
     } else {
       notify.success(`Approve All finished: ${parts.join(' · ')}.`);
     }
+  };
+
+  // Deletes every skipped/blocked letter server-side. A cleared skip is a
+  // forgotten decision: the sweep may re-propose that letter later, back
+  // into the review queue where a human decides again.
+  const clearHistory = async () => {
+    if (clearing) return;
+    setClearArmed(false);
+    if (clearTimer.current) window.clearTimeout(clearTimer.current);
+    setClearing(true);
+    try {
+      const fn = httpsCallable(functions, 'clearLetterHistory');
+      const res = await fn({});
+      const data = res.data as { ok: boolean; deleted: number };
+      notify.success(`Cleared ${data.deleted} skipped/blocked letter${data.deleted === 1 ? '' : 's'}.`);
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Could not clear the list.');
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const armClear = () => {
+    setClearArmed(true);
+    if (clearTimer.current) window.clearTimeout(clearTimer.current);
+    clearTimer.current = window.setTimeout(() => setClearArmed(false), 8000);
   };
 
   // Renders the final page server-side (same renderer approval uses).
@@ -271,6 +301,32 @@ export function MailRoom() {
                 : armed
                   ? `Mail all ${proposed.length} letters — click again to confirm`
                   : `Approve All (${proposed.length})`}
+            </button>
+          </span>
+        )}
+        {tab === 'history' && history.length > 0 && (
+          <span className="ml-auto flex items-center gap-2">
+            {clearArmed && !clearing && (
+              <button
+                onClick={() => setClearArmed(false)}
+                className="rounded-full px-3 py-1.5 font-type text-sm font-semibold text-manila/70 transition hover:bg-white/10"
+              >
+                Cancel
+              </button>
+            )}
+            <button
+              disabled={clearing}
+              onClick={() => (clearArmed ? void clearHistory() : armClear())}
+              title="Delete every skipped and blocked letter — the sweep may propose fresh ones later if a lead still qualifies"
+              className={`rounded-full px-4 py-1.5 font-type text-sm font-bold text-white transition disabled:opacity-60 ${
+                clearArmed && !clearing ? 'bg-red-700 hover:bg-red-600' : 'bg-white/15 hover:bg-white/25'
+              }`}
+            >
+              {clearing
+                ? 'Clearing…'
+                : clearArmed
+                  ? `Delete all ${history.length} — click again to confirm`
+                  : `Clear List (${history.length})`}
             </button>
           </span>
         )}
