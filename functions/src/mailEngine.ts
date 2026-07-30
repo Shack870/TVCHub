@@ -561,8 +561,9 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
   // Geometry: the hard @page margin is 0.5in (PostGrid clips anything
   // outside it), and the text column is padded a further 0.5in — so the
   // LETTER reads with true 1-inch margins while the letterhead alone may
-  // use the extra half inch on each side. That makes the letterhead
-  // 7.48in — 15% wider than the 6.5in text column — with no clipping.
+  // reach into the extra half inch on each side. At 7in the letterhead
+  // runs a quarter inch past the text column on each side (6.5in was too
+  // small, the full 7.48in too big) — clip-safe inside the 7.5in zone.
   // The signature block's left edge sits 4in from the page's left edge
   // (0.5 page + 0.5 padding + 3in offset). Serif comes from an embedded
   // web font (PT Serif) because PostGrid's renderer has no local Georgia.
@@ -575,7 +576,7 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
 </style></head>
 <body>
   <img src="${LETTERHEAD_URL}" alt="${FIRM.name}"
-       style="display:block; width:7.48in; margin:0 -0.49in 22px -0.49in;">
+       style="display:block; width:7in; margin:0 -0.25in 22px -0.25in;">
   <p style="margin:0 0 14px 0;">${esc(todayHuman)}</p>
   <p style="margin:0 0 14px 0;">Dear ${esc(titleCaseName(v.name))},</p>
   ${body}

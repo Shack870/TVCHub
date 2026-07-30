@@ -256,7 +256,7 @@ describe("rendering", () => {
       // serif web font, signature block at the 4in mark, and a situation-
       // tuned P.S. as the last words.
       expect(html).toContain("letterhead.png");
-      expect(html).toContain("width:7.48in");
+      expect(html).toContain("width:7in");
       // 0.5in hard page margin + 0.5in body padding = true 1in text margins,
       // with only the letterhead allowed into the extra half inch.
       expect(html).toContain("size: letter; margin: 0.5in");
