@@ -239,6 +239,7 @@ describe("rendering", () => {
   it("every letter renders with the compliance footer and the phone number", () => {
     const vars = {
       name: "MARKO WACIBA",
+      tvcNumber: "1565395",
       courtDate: "Monday, August 24, 2026",
       courtTime: "9:00 AM",
       courtName: "Benton District Court",
@@ -249,8 +250,13 @@ describe("rendering", () => {
     for (const t of ["intro", "second_chase", "thinking", "motions", "motions_late", "court_week", "court_passed"] as const) {
       const html = renderLetterHtml(t, vars, "Thursday, July 30, 2026");
       expect(html).toContain("ADVERTISING MATERIAL");
+      // The no-relationship-until-retained statement rides on every letter.
+      expect(html).toContain("No attorney&ndash;client relationship");
       expect(html).toContain("870-399-1440");
-      expect(html).toContain("Dear Marko Waciba");
+      expect(html).toContain("Warm hello Marko Waciba");
+      // Every letter names the referral source and their TVC number.
+      expect(html).toContain("TVC Pro Driver");
+      expect(html).toContain("#1565395");
       // The design contract: letterhead image (15% wider than the text
       // column), US Letter with 1in margins, half-inch first-line indents,
       // serif web font, signature block at the 4in mark, and a situation-
@@ -263,7 +269,7 @@ describe("rendering", () => {
       expect(html).toContain("padding: 0.5in 0.5in 0 0.5in");
       expect(html).toContain("text-indent:0.5in");
       expect(html).toContain("PT+Serif");
-      expect(html).toContain("margin:22px 0 0 3.75in");
+      expect(html).toContain("margin:14px 0 0 3.75in");
       expect(html).toContain("P.S.");
       const preview = letterPreviewText(t, vars);
       expect(preview.length).toBeGreaterThan(100);
@@ -275,5 +281,16 @@ describe("rendering", () => {
     const html = renderLetterHtml("court_passed", { name: "X Y", stateName: "Arkansas" }, "Jul 30");
     expect(html).toMatch(/may have issued/);
     expect(html).not.toMatch(/warrant (was|has been) issued/i);
+  });
+
+  it("free reminders shout that we are NOT retained; pitch letters don't", () => {
+    const vars = { name: "X Y", stateName: "Arkansas", courtDate: "Monday, August 24, 2026" };
+    expect(renderLetterHtml("court_week", vars, "Jul 30")).toContain(
+      "WE HAVE NOT BEEN RETAINED ON YOUR CASE YET, AND WE WILL NOT APPEAR ON YOUR BEHALF ON MONDAY, AUGUST 24, 2026",
+    );
+    expect(renderLetterHtml("court_passed", vars, "Jul 30")).toContain(
+      "WE HAVE NOT BEEN RETAINED ON YOUR CASE, AND WE WILL NOT TAKE ANY ACTION ON YOUR BEHALF",
+    );
+    expect(renderLetterHtml("intro", vars, "Jul 30")).not.toContain("WE HAVE NOT BEEN RETAINED");
   });
 });

@@ -352,6 +352,7 @@ export function proposeLetter(
 
 export interface LetterVars {
   name: string;
+  tvcNumber?: string | null; // TVC Pro Driver case number, e.g. "1565395"
   courtDate?: string | null; // human, e.g. "Monday, August 24, 2026"
   courtTime?: string | null;
   courtName?: string | null;
@@ -406,7 +407,7 @@ function courtLine(v: LetterVars): string {
 // fridge: the court date, and the escape hatch phone number under it.
 function keepThisBox(v: LetterVars, heading: string): string {
   return `
-  <div style="border:3px solid #14532d; border-radius:8px; padding:16px 20px; margin:22px 0; text-align:center;">
+  <div style="border:3px solid #14532d; border-radius:8px; padding:10px 20px; margin:14px 0; text-align:center;">
     <div style="font-size:11px; letter-spacing:2px; font-weight:bold; color:#14532d;">${esc(heading)}</div>
     <div style="font-size:20px; font-weight:bold; margin:6px 0;">${esc(courtLine(v))}</div>
     <div style="font-size:13px;">Can't make it? Call <b>${FIRM.phone}</b> — you may not have to.</div>
@@ -419,6 +420,27 @@ function para(text: string): string {
   return `<p style="margin:0 0 10px 0; text-indent:0.5in;">${text}</p>`;
 }
 
+// Every letter opens with this: they know exactly why a law firm in
+// Arkansas is writing to them — TVC Pro Driver sent us their case.
+function referralLine(v: LetterVars): string {
+  const state = v.stateName ?? "Arkansas";
+  return para(
+    `We received your referral from <b>TVC Pro Driver</b> (Truckers Voice in Court), which is how your ${esc(state)} traffic case reached our firm.${
+      v.tvcNumber ? ` Your TVC number is <b>#${esc(v.tvcNumber)}</b>.` : ""
+    }`,
+  );
+}
+
+// The loud disclaimer on free-reminder letters: we are not their lawyers
+// yet, and nobody is showing up for them unless they retain us.
+function notRetainedWarning(v: LetterVars, passed: boolean): string {
+  const when = v.courtDate ? ` ON ${esc(courtDate(v)).toUpperCase()}` : "";
+  const text = passed
+    ? `WE HAVE NOT BEEN RETAINED ON YOUR CASE, AND WE WILL NOT TAKE ANY ACTION ON YOUR BEHALF UNLESS YOU SIGN THE RETAINER AGREEMENT AND PAY THE LEGAL FEE.`
+    : `WE HAVE NOT BEEN RETAINED ON YOUR CASE YET, AND WE WILL NOT APPEAR ON YOUR BEHALF${when}, UNLESS YOU SIGN THE RETAINER AGREEMENT AND PAY THE DISCOUNTED LEGAL FEE.`;
+  return `<p style="margin:0 0 10px 0;"><b>${text}</b></p>`;
+}
+
 // Per-letter body copy. Grounded, short sentences, one job: make them call.
 function letterBody(type: LetterType, v: LetterVars): string {
   const state = v.stateName ?? "Arkansas";
@@ -429,7 +451,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
     case "intro":
       return [
         para(
-          `TVC (Truckers Voice in Court) has assigned your traffic case in ${esc(state)} to our firm, and we have been trying to reach you by phone. We can help you.`,
+          `We have been trying to reach you by phone about your traffic case in ${esc(state)}. We can help you.`,
         ),
         v.courtDate ? para(court + ` As things stand, the court expects you to appear in person in ${esc(state)}.`) : "",
         para(
@@ -472,7 +494,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
     case "motions":
       return [
         para(
-          `There is an important deadline coming in your ${esc(state)} traffic case: <b>${esc(v.deadlineDate ?? "the filing deadline")}</b> is the last day to file a Motion to Continue.`,
+          `Good news! There is still time to file a Motion to Continue your traffic case so you do not have to drive to ${esc(state)} for court. The deadline coming in your ${esc(state)} traffic case: <b>${esc(v.deadlineDate ?? "the filing deadline")}</b>. We can start filing documents on your behalf — just call to hire us today! <b>${FIRM.phone}</b>.`,
         ),
         para(
           `Why it matters to you: right now the court expects you to appear in person${v.courtDate ? ` on <b>${esc(courtDate(v))}</b>` : ""}. If you hire us before the deadline, we can file to move that date and ask the court to excuse your appearance — meaning you likely never make the trip at all, and we get the time we need to fight the ticket properly.`,
@@ -501,6 +523,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
           `This is a free courtesy reminder from our office: your court date in ${esc(state)} is coming up.`,
         ),
         keepThisBox(v, "YOUR COURT DATE — ABOUT ONE WEEK AWAY"),
+        notRetainedWarning(v, false),
         para(
           `If you plan to appear, we wish you the best — no reply needed. If you can't be there, or you'd rather not make the trip, call us right away: in many cases we can still ask the court for a new date and appear on your behalf.`,
         ),
@@ -514,6 +537,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
         para(
           `<b>If you did not appear, the court may have issued a warrant for failure to appear.</b> This is serious, but it is fixable: our firm handles warrant recalls, and the sooner it's addressed, the simpler it is — a routine traffic stop should never turn into an arrest.`,
         ),
+        notRetainedWarning(v, true),
         para(`Call us at <b>${FIRM.phone}</b>. We will tell you honestly where your case stands and exactly what it takes to clear it up.`),
       ].join("");
   }
@@ -572,21 +596,24 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
   @import url('https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400;1,700&display=swap');
   @page { size: letter; margin: 0.5in; }
   html, body { margin: 0; padding: 0; }
-  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 12pt; color: #111; line-height: 1.5; }
+  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 12pt; color: #111; line-height: 1.4; }
 </style></head>
 <body>
   <img src="${LETTERHEAD_URL}" alt="${FIRM.name}"
-       style="display:block; width:7in; margin:0 -0.25in 22px -0.25in;">
-  <p style="margin:0 0 14px 0; text-align:center; font-weight:bold;">${esc(todayHuman)}</p>
-  <p style="margin:0 0 14px 0;">Dear ${esc(titleCaseName(v.name))},</p>
+       style="display:block; width:7in; margin:0 -0.25in 16px -0.25in;">
+  <p style="margin:0 0 10px 0; text-align:center; font-weight:bold;">${esc(todayHuman)}</p>
+  <p style="margin:0 0 10px 0;">Warm hello ${esc(titleCaseName(v.name))},</p>
+  ${referralLine(v)}
   ${body}
-  <div style="margin:22px 0 0 3.75in; white-space:nowrap;">
+  <div style="margin:14px 0 0 3.75in; white-space:nowrap;">
     <p style="margin:0 0 2px 0;">Sincerely,</p>
     <p style="margin:0;"><b>${FIRM.signer}</b><br>${FIRM.signerTitle}, ${FIRM.name}<br><b>${FIRM.phone}</b></p>
   </div>
-  <p style="margin:18px 0 0 0;"><b>${letterPs(type, v)}</b></p>
-  <div style="margin-top: 26px; border-top: 1px solid #999; padding-top: 8px; font-size: 9px; color: #555;">
+  <p style="margin:12px 0 0 0;"><b>${letterPs(type, v)}</b></p>
+  <div style="margin-top: 14px; border-top: 1px solid #999; padding-top: 6px; font-size: 9px; color: #555;">
     ADVERTISING MATERIAL. This letter is a communication from a law firm and is not legal advice.
+    No attorney&ndash;client relationship exists between you and ${FIRM.name} unless and until you
+    sign a retainer agreement, pay the legal fee, and are accepted as a client of the firm.
     If you have already retained counsel for this matter or resolved it, please disregard this letter
     and accept our apologies — call ${FIRM.phone} and we will update our records immediately.
   </div>
@@ -595,7 +622,7 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
 
 // Plain-text preview for the Mail Room card (no HTML soup in the UI).
 export function letterPreviewText(type: LetterType, v: LetterVars): string {
-  return (letterBody(type, v) + `<p>${letterPs(type, v)}</p>`)
+  return (referralLine(v) + letterBody(type, v) + `<p>${letterPs(type, v)}</p>`)
     .replace(/<div[^>]*>/g, "\n")
     .replace(/<p[^>]*>/g, "\n")
     .replace(/<[^>]+>/g, "")

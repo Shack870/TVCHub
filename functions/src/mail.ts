@@ -78,6 +78,7 @@ export function varsForLead(d: Dict, ddlDate: string | null): LetterVars {
   const stateAbbr = str(d.state).toUpperCase();
   return {
     name: str(d.name) || "Driver",
+    tvcNumber: str(d.tvcCaseNumber) || null,
     courtDate,
     courtTime: str(d.nextCourtTime) || null,
     courtName: str(d.courtName) || null,
