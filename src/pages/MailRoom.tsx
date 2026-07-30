@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
 import { formatDistanceToNow } from 'date-fns';
 import { functions } from '../firebase';
@@ -20,6 +20,19 @@ import type { Letter } from '../types';
 // saved edits are what physically mails.
 
 type Tab = 'proposed' | 'sent' | 'history';
+
+// Urgency order for Approve All's duplicate-lead handling. Mirrors the
+// priority map in proposeLetter (functions/src/mailEngine.ts) — that map is
+// the source of truth. Lower number = more urgent.
+const LETTER_PRIORITY: Record<Letter['type'], number> = {
+  court_passed: 0,
+  motions_late: 1,
+  motions: 2,
+  court_week: 3,
+  thinking: 4,
+  second_chase: 5,
+  intro: 6,
+};
 
 const TYPE_TONE: Record<Letter['type'], string> = {
   court_passed: 'bg-red-600/15 text-red-800',
@@ -46,6 +59,11 @@ export function MailRoom() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  // Approve All: null = idle; otherwise a live progress counter.
+  const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
+  // Real letters cost real money — the button must be clicked twice.
+  const [armed, setArmed] = useState(false);
+  const armTimer = useRef<number | null>(null);
 
   const { proposed, sent, history } = useMemo(() => {
     const proposed = letters.filter((l) => l.status === 'proposed');
@@ -57,7 +75,7 @@ export function MailRoom() {
   }, [letters]);
 
   const decide = async (letter: Letter, action: 'approve' | 'skip') => {
-    if (busy) return;
+    if (busy || batch) return;
     setBusy(letter.id);
     try {
       const fn = httpsCallable(functions, 'decideLetter');
@@ -74,6 +92,73 @@ export function MailRoom() {
       notify.error(e instanceof Error ? e.message : 'Could not update the letter.');
     } finally {
       setBusy(null);
+    }
+  };
+
+  // Arms the Approve All confirm step; disarms itself if not confirmed.
+  const armApproveAll = () => {
+    setArmed(true);
+    if (armTimer.current) window.clearTimeout(armTimer.current);
+    armTimer.current = window.setTimeout(() => setArmed(false), 8000);
+  };
+
+  // Mails the whole To Approve queue, one decideLetter call at a time
+  // (sequential on purpose: PostGrid rate limits, Firestore contention).
+  // A lead with multiple proposed letters gets only its most urgent one;
+  // the rest are skipped so nobody receives two letters the same day.
+  // Individual failures (blocked at re-check, bad address) never stop the
+  // run — they're collected and summarized at the end.
+  const approveAll = async () => {
+    if (batch) return;
+    setArmed(false);
+    if (armTimer.current) window.clearTimeout(armTimer.current);
+    const queue = proposed;
+    if (!queue.length) return;
+    setBatch({ done: 0, total: queue.length });
+
+    const byLead = new Map<string, Letter[]>();
+    for (const l of queue) {
+      byLead.set(l.leadId, [...(byLead.get(l.leadId) ?? []), l]);
+    }
+    const tasks: { letter: Letter; action: 'approve' | 'skip' }[] = [];
+    for (const group of byLead.values()) {
+      group.sort((a, b) => LETTER_PRIORITY[a.type] - LETTER_PRIORITY[b.type]);
+      group.forEach((letter, i) => tasks.push({ letter, action: i === 0 ? 'approve' : 'skip' }));
+    }
+
+    const fn = httpsCallable(functions, 'decideLetter');
+    let mailed = 0;
+    let dupSkipped = 0;
+    const failures: string[] = [];
+    let done = 0;
+    for (const t of tasks) {
+      try {
+        await fn({ letterId: t.letter.id, action: t.action });
+        if (t.action === 'approve') mailed++;
+        else dupSkipped++;
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : 'unknown error');
+      }
+      done++;
+      setBatch({ done, total: tasks.length });
+    }
+    setBatch(null);
+
+    const parts = [`${mailed} mailed`];
+    if (dupSkipped) {
+      parts.push(`${dupSkipped} duplicate${dupSkipped === 1 ? '' : 's'} for the same lead auto-skipped`);
+    }
+    if (failures.length) {
+      const counts = new Map<string, number>();
+      for (const f of failures) counts.set(f, (counts.get(f) ?? 0) + 1);
+      const top = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 2)
+        .map(([msg, n]) => `${msg.length > 110 ? `${msg.slice(0, 110)}…` : msg}${n > 1 ? ` (×${n})` : ''}`);
+      parts.push(`${failures.length} not mailed — ${top.join('; ')}`);
+      notify.error(`Approve All finished: ${parts.join(' · ')}`);
+    } else {
+      notify.success(`Approve All finished: ${parts.join(' · ')}.`);
     }
   };
 
@@ -143,7 +228,7 @@ export function MailRoom() {
         </p>
       </header>
 
-      <div className="mb-4 flex gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         {(
           [
             ['proposed', `To Approve (${proposed.length})`],
@@ -161,6 +246,34 @@ export function MailRoom() {
             {label}
           </button>
         ))}
+        {tab === 'proposed' && proposed.length > 0 && (
+          <span className="ml-auto flex items-center gap-2">
+            {armed && !batch && (
+              <button
+                onClick={() => setArmed(false)}
+                className="rounded-full px-3 py-1.5 font-type text-sm font-semibold text-manila/70 transition hover:bg-white/10"
+              >
+                Cancel
+              </button>
+            )}
+            <button
+              disabled={!!batch}
+              onClick={() => (armed ? void approveAll() : armApproveAll())}
+              title="Mail every letter in the queue — each one still gets the live eligibility re-check"
+              className={`rounded-full px-4 py-1.5 font-type text-sm font-bold text-white transition disabled:opacity-60 ${
+                armed && !batch
+                  ? 'bg-red-700 hover:bg-red-600'
+                  : 'bg-emerald-700 hover:bg-emerald-600'
+              }`}
+            >
+              {batch
+                ? `Mailing ${batch.done}/${batch.total}…`
+                : armed
+                  ? `Mail all ${proposed.length} letters — click again to confirm`
+                  : `Approve All (${proposed.length})`}
+            </button>
+          </span>
+        )}
       </div>
 
       {list.length === 0 ? (
@@ -282,14 +395,14 @@ export function MailRoom() {
                         </button>
                       )}
                       <button
-                        disabled={busy === l.id}
+                        disabled={busy === l.id || !!batch}
                         onClick={() => void decide(l, 'skip')}
                         className="rounded-md border border-pad-ink/20 px-3 py-1.5 font-type text-xs font-semibold text-pad-inkSoft transition hover:bg-black/10 disabled:opacity-50"
                       >
                         Skip
                       </button>
                       <button
-                        disabled={busy === l.id}
+                        disabled={busy === l.id || !!batch}
                         onClick={() => void decide(l, 'approve')}
                         className="rounded-md bg-emerald-700 px-3 py-1.5 font-type text-xs font-bold text-white transition hover:bg-emerald-600 disabled:opacity-50"
                       >
