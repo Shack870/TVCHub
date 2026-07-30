@@ -76,8 +76,16 @@ export function parseMailAddress(raw: unknown): MailAddress | null {
   if (!s) return null;
   const m = /^(.*?),?\s*([A-Za-z .'-]+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/.exec(s);
   if (!m) return null;
-  const line1 = m[1].replace(/,\s*$/, "").trim();
-  const city = m[2].trim();
+  let line1 = m[1].replace(/,\s*$/, "").trim();
+  let city = m[2].trim();
+  // Comma-less addresses with a lettered unit split wrong: the city part
+  // can't contain digits, so "APT 9H SAN FRANCISCO" parses as line1
+  // "... APT 9" + city "H SAN FRANCISCO". Reattach the stray unit letter.
+  const unitSplit = /^([A-Za-z])\s+(.{2,})$/.exec(city);
+  if (unitSplit && /(?:apt|apartment|unit|ste|suite|rm|room|trlr|lot|bldg|no\.?|#)\s*\d+$/i.test(line1)) {
+    line1 += unitSplit[1];
+    city = unitSplit[2].trim();
+  }
   if (!line1 || !city) return null;
   return { line1, city, provinceOrState: m[3], postalOrZip: m[4] };
 }

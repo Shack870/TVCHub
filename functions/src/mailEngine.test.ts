@@ -57,6 +57,26 @@ describe("parseMailAddress", () => {
     });
   });
 
+  it("reattaches a lettered unit split into the city (comma-less addresses)", () => {
+    // Real case: Mirshokhid Sunnatilloev — "APT 9H" has no comma before the
+    // city, and digits can't be in the city, so "H" landed there and USPS
+    // rejected "APT 9".
+    expect(parseMailAddress("55 CHUMASERO DR APT 9H SAN FRANCISCO, CA 94132")).toEqual({
+      line1: "55 CHUMASERO DR APT 9H",
+      city: "SAN FRANCISCO",
+      provinceOrState: "CA",
+      postalOrZip: "94132",
+    });
+    // But a legitimate one-word-then-more city is left alone when line1 has
+    // no numbered unit at its end.
+    expect(parseMailAddress("100 MAIN ST, EL PASO, TX 79901")).toEqual({
+      line1: "100 MAIN ST",
+      city: "EL PASO",
+      provinceOrState: "TX",
+      postalOrZip: "79901",
+    });
+  });
+
   it("rejects junk — a half address is a dollar mailed to nowhere", () => {
     expect(parseMailAddress("")).toBeNull();
     expect(parseMailAddress(undefined)).toBeNull();
