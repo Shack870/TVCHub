@@ -407,7 +407,7 @@ function courtLine(v: LetterVars): string {
 // fridge: the court date, and the escape hatch phone number under it.
 function keepThisBox(v: LetterVars, heading: string): string {
   return `
-  <div style="border:3px solid #14532d; border-radius:8px; padding:10px 20px; margin:14px 0; text-align:center;">
+  <div style="border:3px solid #14532d; border-radius:8px; padding:8px 20px; margin:10px 0; text-align:center;">
     <div style="font-size:11px; letter-spacing:2px; font-weight:bold; color:#14532d;">${esc(heading)}</div>
     <div style="font-size:20px; font-weight:bold; margin:6px 0;">${esc(courtLine(v))}</div>
     <div style="font-size:13px;">Can't make it? Call <b>${FIRM.phone}</b> — you may not have to.</div>
@@ -417,7 +417,7 @@ function keepThisBox(v: LetterVars, heading: string): string {
 // Body paragraphs: classic letter typesetting — half-inch first-line indent,
 // no gap between paragraphs beyond a small breath.
 function para(html: string): string {
-  return `<p style="margin:0 0 10px 0; text-indent:0.5in;">${html}</p>`;
+  return `<p style="margin:0 0 8px 0; text-indent:0.5in;">${html}</p>`;
 }
 
 // ---------- Editable letter text ----------
@@ -520,18 +520,18 @@ function letterSegments(type: LetterType, v: LetterVars): string[] {
       ];
     case "court_week":
       return [
-        `This is a free courtesy reminder from our office: your court date in ${state} is coming up.`,
+        `This is a free courtesy reminder from our office: your court date in ${state} is one week away.`,
         COURT_DATE_BOX_TOKEN,
         notRetainedMd(v, false),
-        `If you plan to appear, we wish you the best — no reply needed. If you can't be there, or you'd rather not make the trip, call us right away: in many cases we can still ask the court for a new date and appear on your behalf.`,
-        `**Missing a court date usually leads to a warrant.** A five-minute call to **${FIRM.phone}** can keep it from getting there.`,
+        `If you plan to make the drive and appear, we wish you the best — no reply needed. But if you would rather keep your truck rolling, there is a better way: hire us, and we immediately ask the court to excuse your appearance and reset the date. From there we go to work on the ticket itself — dismissed, negotiated down, or beaten at trial — protecting your driving record, your insurance rates, and your CDL.`,
+        `Even one week out, there is still time for us to act — but the window is closing by the day. **Missing a court date usually leads to a warrant for your arrest.** A five-minute call to **${FIRM.phone}** keeps it from ever getting there.`,
       ];
     case "court_passed":
       return [
         `Our records show your court date in ${state}${v.courtDate ? ` (**${courtDate(v)}**)` : ""} has passed. If you appeared or resolved the ticket — congratulations, and you can set this letter aside.`,
         `**If you did not appear, the court may have issued a warrant for failure to appear.** This is serious, but it is fixable: our firm handles warrant recalls, and the sooner it's addressed, the simpler it is — a routine traffic stop should never turn into an arrest.`,
         notRetainedMd(v, true),
-        `Call us at **${FIRM.phone}**. We will tell you honestly where your case stands and exactly what it takes to clear it up.`,
+        `Call us at **${FIRM.phone}**. We will tell you honestly where your case stands — and if you hire us, we start the warrant-recall paperwork the same day and get your case back on track.`,
       ];
   }
 }
@@ -562,7 +562,7 @@ export function letterPs(type: LetterType, v: LetterVars): string {
     case "motions_late":
       return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — and every day past the deadline makes both harder. Call us right now, and we start filing paperwork the moment you hire us.`;
     case "court_week":
-      return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — we can still help with both, even this close to court. Just call us today, and we start filing paperwork to help you.`;
+      return `P.S. No drive to ${state}, no ticket on your record — one call today and we start filing the same day.`;
     case "court_passed":
       return `P.S. A warrant doesn't go away on its own — and you don't want it following your license around. Call us today, and we start the paperwork to clear this up for you.`;
   }
@@ -597,7 +597,7 @@ export function renderLetterFromText(
       continue;
     }
     if (/^(\*\*)?P\.S\./.test(b)) {
-      psParts.push(`<p style="margin:12px 0 0 0;"><b>${mdInline(b.replace(/\*\*/g, ""))}</b></p>`);
+      psParts.push(`<p style="margin:8px 0 0 0;"><b>${mdInline(b.replace(/\*\*/g, ""))}</b></p>`);
       continue;
     }
     bodyParts.push(para(mdInline(b)));
@@ -615,20 +615,20 @@ export function renderLetterFromText(
   @import url('https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400;1,700&display=swap');
   @page { size: letter; margin: 0.5in; }
   html, body { margin: 0; padding: 0; }
-  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 12pt; color: #111; line-height: 1.4; }
+  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 12pt; color: #111; line-height: 1.35; }
 </style></head>
 <body>
   <img src="${LETTERHEAD_URL}" alt="${FIRM.name}"
-       style="display:block; width:7in; margin:0 -0.25in 16px -0.25in;">
+       style="display:block; width:7in; margin:0 -0.25in 12px -0.25in;">
   <p style="margin:0 0 10px 0; text-align:center; font-weight:bold;">${esc(todayHuman)}</p>
   <p style="margin:0 0 10px 0;">Warm hello ${esc(titleCaseName(v.name))},</p>
   ${bodyParts.join("\n  ")}
-  <div style="margin:14px 0 0 3.75in; white-space:nowrap;">
+  <div style="margin:10px 0 0 3.75in; white-space:nowrap;">
     <p style="margin:0 0 2px 0;">Sincerely,</p>
     <p style="margin:0;"><b>${FIRM.signer}</b><br>${FIRM.signerTitle}, ${FIRM.name}<br><b>${FIRM.phone}</b></p>
   </div>
   ${psParts.join("\n  ")}
-  <div style="margin-top: 14px; border-top: 1px solid #999; padding-top: 6px; font-size: 9px; color: #555;">
+  <div style="margin-top: 8px; border-top: 1px solid #999; padding-top: 4px; font-size: 9px; color: #555;">
     ADVERTISING MATERIAL. This letter is a communication from a law firm and is not legal advice.
     No attorney&ndash;client relationship exists between you and ${FIRM.name} unless and until you
     sign a retainer agreement, pay the legal fee, and are accepted as a client of the firm.
