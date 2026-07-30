@@ -491,7 +491,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
           `Courts sometimes accept late-filed motions, and every day matters. If you call us immediately, we can still try to move your court date${v.courtDate ? ` (<b>${esc(courtDate(v))}</b>)` : ""} and ask the court to excuse you from appearing in person.`,
         ),
         para(
-          `If we can't move it, you are expected in court — and missing it can lead to a warrant. Don't let it get there. Call <b>${FIRM.phone}</b> the moment you read this.`,
+          `<b>If we can't move it, you are expected in court — and missing it can lead to a warrant for your arrest.</b> Don't let it get there. Call <b>${FIRM.phone}</b> the moment you read this.`,
         ),
         v.courtDate ? keepThisBox(v, "KEEP THIS — YOUR COURT DATE") : "",
       ].join("");
@@ -504,7 +504,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
         para(
           `If you plan to appear, we wish you the best — no reply needed. If you can't be there, or you'd rather not make the trip, call us right away: in many cases we can still ask the court for a new date and appear on your behalf.`,
         ),
-        para(`Missing a court date usually leads to a warrant. A five-minute call to <b>${FIRM.phone}</b> can keep it from getting there.`),
+        para(`<b>Missing a court date usually leads to a warrant.</b> A five-minute call to <b>${FIRM.phone}</b> can keep it from getting there.`),
       ].join("");
     case "court_passed":
       return [
@@ -512,7 +512,7 @@ function letterBody(type: LetterType, v: LetterVars): string {
           `Our records show your court date in ${esc(state)}${v.courtDate ? ` (<b>${esc(courtDate(v))}</b>)` : ""} has passed. If you appeared or resolved the ticket — congratulations, and you can set this letter aside.`,
         ),
         para(
-          `If you did not appear, the court <b>may have issued a warrant</b> for failure to appear. This is serious, but it is fixable: our firm handles warrant recalls, and the sooner it's addressed, the simpler it is — a routine traffic stop should never turn into an arrest.`,
+          `<b>If you did not appear, the court may have issued a warrant for failure to appear.</b> This is serious, but it is fixable: our firm handles warrant recalls, and the sooner it's addressed, the simpler it is — a routine traffic stop should never turn into an arrest.`,
         ),
         para(`Call us at <b>${FIRM.phone}</b>. We will tell you honestly where your case stands and exactly what it takes to clear it up.`),
       ].join("");
@@ -521,6 +521,28 @@ function letterBody(type: LetterType, v: LetterVars): string {
 
 function courtDate(v: LetterVars): string {
   return `${v.courtDate}${v.courtTime ? ` at ${v.courtTime}` : ""}`;
+}
+
+// The P.S. — the last thing they read, and for a skimmer sometimes the only
+// thing. One sentence of "you don't want the trip, you don't want the
+// record, call today and the paperwork starts" tuned to each situation.
+export function letterPs(type: LetterType, v: LetterVars): string {
+  const state = esc(v.stateName ?? "Arkansas");
+  switch (type) {
+    case "intro":
+    case "second_chase":
+      return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — we can help with both. Just call us today, and we start filing paperwork to help you.`;
+    case "thinking":
+      return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — we can help with both. While you think it over, the court's deadlines keep moving. Call us today, and we start filing paperwork the same day.`;
+    case "motions":
+      return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — we can fix both, but only if we file before the deadline. Call us today, and the paperwork starts today.`;
+    case "motions_late":
+      return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — and every day past the deadline makes both harder. Call us right now, and we start filing paperwork the moment you hire us.`;
+    case "court_week":
+      return `P.S. You don't want to drive to ${state}, and you don't want a ticket on your record — we can still help with both, even this close to court. Just call us today, and we start filing paperwork to help you.`;
+    case "court_passed":
+      return `P.S. A warrant doesn't go away on its own — and you don't want it following your license around. Call us today, and we start the paperwork to clear this up for you.`;
+  }
 }
 
 // The firm letterhead image, hosted on the app's public Firebase site so
@@ -536,20 +558,32 @@ export const LETTERHEAD_URL = "https://tvchub-f2401.web.app/letterhead.png";
 // the letterhead design.
 export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: string): string {
   const body = letterBody(type, v);
+  // Geometry: the hard @page margin is 0.5in (PostGrid clips anything
+  // outside it), and the text column is padded a further 0.5in — so the
+  // LETTER reads with true 1-inch margins while the letterhead alone may
+  // use the extra half inch on each side. That makes the letterhead
+  // 7.48in — 15% wider than the 6.5in text column — with no clipping.
+  // The signature block's left edge sits 4in from the page's left edge
+  // (0.5 page + 0.5 padding + 3in offset). Serif comes from an embedded
+  // web font (PT Serif) because PostGrid's renderer has no local Georgia.
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-  @page { size: letter; margin: 1in; }
+  @import url('https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400;1,700&display=swap');
+  @page { size: letter; margin: 0.5in; }
   html, body { margin: 0; padding: 0; }
-  body { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #111; line-height: 1.5; }
+  body { padding: 0.5in 0.5in 0 0.5in; font-family: 'PT Serif', Georgia, 'Times New Roman', serif; font-size: 13px; color: #111; line-height: 1.5; }
 </style></head>
 <body>
   <img src="${LETTERHEAD_URL}" alt="${FIRM.name}"
-       style="display:block; margin:0 auto 22px auto; width:100%; max-width:6.5in;">
+       style="display:block; width:7.48in; margin:0 -0.49in 22px -0.49in;">
   <p style="margin:0 0 14px 0;">${esc(todayHuman)}</p>
   <p style="margin:0 0 14px 0;">Dear ${esc(titleCaseName(v.name))},</p>
   ${body}
-  <p style="margin:22px 0 2px 0;">Sincerely,</p>
-  <p style="margin:0;"><b>${FIRM.signer}</b><br>${FIRM.signerTitle}, ${FIRM.name}<br><b>${FIRM.phone}</b></p>
+  <div style="margin:22px 0 0 3in;">
+    <p style="margin:0 0 2px 0;">Sincerely,</p>
+    <p style="margin:0;"><b>${FIRM.signer}</b><br>${FIRM.signerTitle}, ${FIRM.name}<br><b>${FIRM.phone}</b></p>
+  </div>
+  <p style="margin:18px 0 0 0;"><b>${letterPs(type, v)}</b></p>
   <div style="margin-top: 26px; border-top: 1px solid #999; padding-top: 8px; font-size: 9px; color: #555;">
     ADVERTISING MATERIAL. This letter is a communication from a law firm and is not legal advice.
     If you have already retained counsel for this matter or resolved it, please disregard this letter
@@ -560,7 +594,7 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
 
 // Plain-text preview for the Mail Room card (no HTML soup in the UI).
 export function letterPreviewText(type: LetterType, v: LetterVars): string {
-  return letterBody(type, v)
+  return (letterBody(type, v) + `<p>${letterPs(type, v)}</p>`)
     .replace(/<div[^>]*>/g, "\n")
     .replace(/<p[^>]*>/g, "\n")
     .replace(/<[^>]+>/g, "")

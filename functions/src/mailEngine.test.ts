@@ -251,11 +251,20 @@ describe("rendering", () => {
       expect(html).toContain("ADVERTISING MATERIAL");
       expect(html).toContain("870-399-1440");
       expect(html).toContain("Dear Marko Waciba");
-      // The design contract: letterhead image, US Letter with 1in margins,
-      // half-inch first-line indents on body paragraphs.
+      // The design contract: letterhead image (15% wider than the text
+      // column), US Letter with 1in margins, half-inch first-line indents,
+      // serif web font, signature block at the 4in mark, and a situation-
+      // tuned P.S. as the last words.
       expect(html).toContain("letterhead.png");
-      expect(html).toContain("size: letter; margin: 1in");
+      expect(html).toContain("width:7.48in");
+      // 0.5in hard page margin + 0.5in body padding = true 1in text margins,
+      // with only the letterhead allowed into the extra half inch.
+      expect(html).toContain("size: letter; margin: 0.5in");
+      expect(html).toContain("padding: 0.5in 0.5in 0 0.5in");
       expect(html).toContain("text-indent:0.5in");
+      expect(html).toContain("PT+Serif");
+      expect(html).toContain("margin:22px 0 0 3in");
+      expect(html).toContain("P.S.");
       const preview = letterPreviewText(t, vars);
       expect(preview.length).toBeGreaterThan(100);
       expect(preview).not.toContain("<");
