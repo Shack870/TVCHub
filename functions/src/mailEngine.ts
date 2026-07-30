@@ -416,137 +416,130 @@ function keepThisBox(v: LetterVars, heading: string): string {
 
 // Body paragraphs: classic letter typesetting — half-inch first-line indent,
 // no gap between paragraphs beyond a small breath.
-function para(text: string): string {
-  return `<p style="margin:0 0 10px 0; text-indent:0.5in;">${text}</p>`;
+function para(html: string): string {
+  return `<p style="margin:0 0 10px 0; text-indent:0.5in;">${html}</p>`;
+}
+
+// ---------- Editable letter text ----------
+//
+// A letter's words live as plain editable text (stored on the letter doc as
+// bodyText, shown in the Mail Room), and ONE renderer turns that text into
+// the printed HTML — so what a reviewer edits is exactly what mails.
+// The text is light markdown:
+//   - blank lines separate paragraphs
+//   - **text** prints bold
+//   - a paragraph starting with "P.S." prints bold below the signature
+//   - a line that is exactly [[COURT DATE BOX]] prints the boxed court-date
+//     panel at that spot (dropped automatically if the lead has no date)
+
+export const COURT_DATE_BOX_TOKEN = "[[COURT DATE BOX]]";
+
+// One markdown paragraph -> inline HTML (escape first, then formatting).
+function mdInline(block: string): string {
+  return esc(block)
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\n/g, "<br>");
+}
+
+function boxHeading(type: LetterType): string {
+  return type === "court_week" ? "YOUR COURT DATE — ABOUT ONE WEEK AWAY" : "KEEP THIS — YOUR COURT DATE";
 }
 
 // Every letter opens with this: they know exactly why a law firm in
-// Arkansas is writing to them — TVC Pro Driver sent us their case.
-function referralLine(v: LetterVars): string {
+// Arkansas is writing to them — TVC Pro-Driver sent us their case.
+function referralMd(v: LetterVars): string {
   const state = v.stateName ?? "Arkansas";
-  return para(
-    `We received your referral from <b>TVC Pro-Driver</b>, which is how your ${esc(state)} traffic case reached our firm.${
-      v.tvcNumber ? ` Your TVC number is <b>#${esc(v.tvcNumber)}</b>.` : ""
-    }`,
-  );
+  return `We received your referral from **TVC Pro-Driver**, which is how your ${state} traffic case reached our firm.${
+    v.tvcNumber ? ` Your TVC number is **#${v.tvcNumber}**.` : ""
+  }`;
 }
 
 // The loud disclaimer on free-reminder letters: we are not their lawyers
 // yet, and nobody is showing up for them unless they retain us.
-function notRetainedWarning(v: LetterVars, passed: boolean): string {
-  const when = v.courtDate ? ` ON ${esc(courtDate(v)).toUpperCase()}` : "";
-  const text = passed
-    ? `We have not been retained on your case, and we will not take any action on your behalf unless properly retained.`
-    : `WE HAVE NOT BEEN RETAINED ON YOUR CASE YET, AND WE WILL NOT APPEAR ON YOUR BEHALF${when}, UNLESS YOU SIGN THE RETAINER AGREEMENT AND PAY THE DISCOUNTED LEGAL FEE.`;
-  return `<p style="margin:0 0 10px 0;"><b>${text}</b></p>`;
+function notRetainedMd(v: LetterVars, passed: boolean): string {
+  const when = v.courtDate ? ` ON ${courtDate(v).toUpperCase()}` : "";
+  return passed
+    ? `**We have not been retained on your case, and we will not take any action on your behalf unless properly retained.**`
+    : `**WE HAVE NOT BEEN RETAINED ON YOUR CASE YET, AND WE WILL NOT APPEAR ON YOUR BEHALF${when}, UNLESS YOU SIGN THE RETAINER AGREEMENT AND PAY THE DISCOUNTED LEGAL FEE.**`;
 }
 
-// Per-letter body copy. Grounded, short sentences, one job: make them call.
-function letterBody(type: LetterType, v: LetterVars): string {
+// Per-letter body copy in editable-markdown form. Grounded, short
+// sentences, one job: make them call.
+function letterSegments(type: LetterType, v: LetterVars): string[] {
   const state = v.stateName ?? "Arkansas";
-  const court = v.courtDate
-    ? `Your court date is <b>${esc(courtDate(v))}</b>.`
-    : "";
+  const court = v.courtDate ? `Your court date is **${courtDate(v)}**.` : "";
   switch (type) {
     case "intro":
       return [
-        para(
-          `We have been trying to reach you by phone about your traffic case in ${esc(state)}. We can help you.`,
-        ),
-        v.courtDate ? para(court + ` As things stand, the court expects you to appear in person in ${esc(state)}.`) : "",
-        para(
-          `If we are hired, we can ask the court to excuse your appearance — most of our clients never travel back at all. We work to get tickets dismissed, reduced, or beaten at trial, and we protect your driving record and your CDL.`,
-        ),
-        para(`Please call us at <b>${FIRM.phone}</b>. It costs nothing to talk, and we can start filing court documents on your behalf immediately.`),
-        v.courtDate ? keepThisBox(v, "KEEP THIS — YOUR COURT DATE") : "",
-      ].join("");
+        `We have been trying to reach you by phone about your traffic case in ${state}. We can help you.`,
+        ...(v.courtDate
+          ? [court + ` As things stand, the court expects you to appear in person in ${state}.`]
+          : []),
+        `If we are hired, we can ask the court to excuse your appearance — most of our clients never travel back at all. We work to get tickets dismissed, reduced, or beaten at trial, and we protect your driving record and your CDL.`,
+        `Please call us at **${FIRM.phone}**. It costs nothing to talk, and we can start filing court documents on your behalf immediately.`,
+        ...(v.courtDate ? [COURT_DATE_BOX_TOKEN] : []),
+      ];
     case "second_chase":
       return [
-        para(
-          `We have tried to reach you by phone several times about your traffic case in ${esc(state)} — this letter may be the only way to reach you.`,
-        ),
+        `We have tried to reach you by phone several times about your traffic case in ${state} — this letter may be the only way to reach you.`,
         v.courtDate
-          ? para(
-              court +
-                ` Important deadlines come before that date, and once they pass, some of the best options for your case pass with them.`,
-            )
-          : para(`Important deadlines in a traffic case expire quickly, and once they pass, some of the best options for your case pass with them.`),
-        para(
-          `One phone call is all it takes to find out what we can do — including asking the court to excuse you from appearing in person. Call <b>${FIRM.phone}</b> today.`,
-        ),
-        v.courtDate ? keepThisBox(v, "KEEP THIS — YOUR COURT DATE") : "",
-      ].join("");
+          ? court +
+            ` Important deadlines come before that date, and once they pass, some of the best options for your case pass with them.`
+          : `Important deadlines in a traffic case expire quickly, and once they pass, some of the best options for your case pass with them.`,
+        `One phone call is all it takes to find out what we can do — including asking the court to excuse you from appearing in person. Call **${FIRM.phone}** today.`,
+        ...(v.courtDate ? [COURT_DATE_BOX_TOKEN] : []),
+      ];
     case "thinking":
+      // No keep-this box here: the copy already carries the bold court date,
+      // and with it the letter runs past one page.
       return [
-        para(
-          `It was good speaking with you about your ${esc(state)} traffic case. You wanted a little time to think it over — that's completely understandable. This letter will be here when you're ready.`,
-        ),
-        para(
-          `One important benefit of hiring us now is that we can ask the Court for a Motion for Continuance, which often allows you to avoid making the drive to your scheduled court date while we begin working on your case. The earlier we are hired, the more likely we are to have time to request that relief before your appearance is required.`,
-        ),
-        para(
-          `From there, we handle the case for you. We work to have the ticket dismissed, negotiated to a lesser offense, or defended at trial if necessary — all with the goal of protecting your driving record, your insurance rates, and your livelihood.`,
-        ),
-        v.courtDate
-          ? para(
+        `It was good speaking with you about your ${state} traffic case. You wanted a little time to think it over — that's completely understandable. This letter will be here when you're ready.`,
+        `One important benefit of hiring us now is that we can ask the Court for a Motion for Continuance, which often allows you to avoid making the drive to your scheduled court date while we begin working on your case. The earlier we are hired, the more likely we are to have time to request that relief before your appearance is required.`,
+        `From there, we handle the case for you. We work to have the ticket dismissed, negotiated to a lesser offense, or defended at trial if necessary — all with the goal of protecting your driving record, your insurance rates, and your livelihood.`,
+        ...(v.courtDate
+          ? [
               court +
                 ` The sooner we get started, the more options we have, because important filing deadlines occur well before the court date itself.`,
-            )
-          : "",
-        // No keep-this box here: the copy already carries the bold court date,
-        // and with it the letter runs past one page.
-        para(`Call <b>${FIRM.phone}</b> and we can have your defense started the same day.`),
-      ].join("");
+            ]
+          : []),
+        `Call **${FIRM.phone}** and we can have your defense started the same day.`,
+      ];
     case "motions":
       return [
-        para(
-          `Good news! There is still time to file a Motion to Continue your traffic case so you do not have to drive to ${esc(state)} for court. The deadline coming in your ${esc(state)} traffic case: <b>${esc(v.deadlineDate ?? "the filing deadline")}</b>. We can start filing documents on your behalf — just call to hire us today! <b>${FIRM.phone}</b>.`,
-        ),
-        para(
-          `Why it matters to you: right now the court expects you to appear in person${v.courtDate ? ` on <b>${esc(courtDate(v))}</b>` : ""}. If you hire us before the deadline, we can file to move that date and ask the court to excuse your appearance — meaning you likely never make the trip at all, and we get the time we need to fight the ticket properly.`,
-        ),
-        para(
-          `After the deadline passes, this option gets much harder. Call <b>${FIRM.phone}</b> today and we can have the paperwork moving the same day.`,
-        ),
-        v.courtDate ? keepThisBox(v, "KEEP THIS — YOUR COURT DATE") : "",
-      ].join("");
+        `Good news! There is still time to file a Motion to Continue your traffic case so you do not have to drive to ${state} for court. The deadline coming in your ${state} traffic case: **${v.deadlineDate ?? "the filing deadline"}**. We can start filing documents on your behalf — just call to hire us today! **${FIRM.phone}**.`,
+        `Why it matters to you: right now the court expects you to appear in person${v.courtDate ? ` on **${courtDate(v)}**` : ""}. If you hire us before the deadline, we can file to move that date and ask the court to excuse your appearance — meaning you likely never make the trip at all, and we get the time we need to fight the ticket properly.`,
+        `After the deadline passes, this option gets much harder. Call **${FIRM.phone}** today and we can have the paperwork moving the same day.`,
+        ...(v.courtDate ? [COURT_DATE_BOX_TOKEN] : []),
+      ];
     case "motions_late":
       return [
-        para(
-          `The standard deadline to file a Motion to Continue in your ${esc(state)} traffic case has now passed — but this is not over.`,
-        ),
-        para(
-          `Courts sometimes accept late-filed motions, and every day matters. If you call us immediately, we can still try to move your court date${v.courtDate ? ` (<b>${esc(courtDate(v))}</b>)` : ""} and ask the court to excuse you from appearing in person.`,
-        ),
-        para(
-          `<b>If we can't move it, you are expected in court — and missing it can lead to a warrant for your arrest.</b> Don't let it get there. Call <b>${FIRM.phone}</b> the moment you read this.`,
-        ),
-        v.courtDate ? keepThisBox(v, "KEEP THIS — YOUR COURT DATE") : "",
-      ].join("");
+        `The standard deadline to file a Motion to Continue in your ${state} traffic case has now passed — but this is not over.`,
+        `Courts sometimes accept late-filed motions, and every day matters. If you call us immediately, we can still try to move your court date${v.courtDate ? ` (**${courtDate(v)}**)` : ""} and ask the court to excuse you from appearing in person.`,
+        `**If we can't move it, you are expected in court — and missing it can lead to a warrant for your arrest.** Don't let it get there. Call **${FIRM.phone}** the moment you read this.`,
+        ...(v.courtDate ? [COURT_DATE_BOX_TOKEN] : []),
+      ];
     case "court_week":
       return [
-        para(
-          `This is a free courtesy reminder from our office: your court date in ${esc(state)} is coming up.`,
-        ),
-        keepThisBox(v, "YOUR COURT DATE — ABOUT ONE WEEK AWAY"),
-        notRetainedWarning(v, false),
-        para(
-          `If you plan to appear, we wish you the best — no reply needed. If you can't be there, or you'd rather not make the trip, call us right away: in many cases we can still ask the court for a new date and appear on your behalf.`,
-        ),
-        para(`<b>Missing a court date usually leads to a warrant.</b> A five-minute call to <b>${FIRM.phone}</b> can keep it from getting there.`),
-      ].join("");
+        `This is a free courtesy reminder from our office: your court date in ${state} is coming up.`,
+        COURT_DATE_BOX_TOKEN,
+        notRetainedMd(v, false),
+        `If you plan to appear, we wish you the best — no reply needed. If you can't be there, or you'd rather not make the trip, call us right away: in many cases we can still ask the court for a new date and appear on your behalf.`,
+        `**Missing a court date usually leads to a warrant.** A five-minute call to **${FIRM.phone}** can keep it from getting there.`,
+      ];
     case "court_passed":
       return [
-        para(
-          `Our records show your court date in ${esc(state)}${v.courtDate ? ` (<b>${esc(courtDate(v))}</b>)` : ""} has passed. If you appeared or resolved the ticket — congratulations, and you can set this letter aside.`,
-        ),
-        para(
-          `<b>If you did not appear, the court may have issued a warrant for failure to appear.</b> This is serious, but it is fixable: our firm handles warrant recalls, and the sooner it's addressed, the simpler it is — a routine traffic stop should never turn into an arrest.`,
-        ),
-        notRetainedWarning(v, true),
-        para(`Call us at <b>${FIRM.phone}</b>. We will tell you honestly where your case stands and exactly what it takes to clear it up.`),
-      ].join("");
+        `Our records show your court date in ${state}${v.courtDate ? ` (**${courtDate(v)}**)` : ""} has passed. If you appeared or resolved the ticket — congratulations, and you can set this letter aside.`,
+        `**If you did not appear, the court may have issued a warrant for failure to appear.** This is serious, but it is fixable: our firm handles warrant recalls, and the sooner it's addressed, the simpler it is — a routine traffic stop should never turn into an arrest.`,
+        notRetainedMd(v, true),
+        `Call us at **${FIRM.phone}**. We will tell you honestly where your case stands and exactly what it takes to clear it up.`,
+      ];
   }
+}
+
+// The full editable text of a letter: referral line, body, P.S. — everything
+// between the salutation and the signature block, in the reviewer's hands.
+export function letterEditableText(type: LetterType, v: LetterVars): string {
+  return [referralMd(v), ...letterSegments(type, v), `**${letterPs(type, v)}**`].join("\n\n");
 }
 
 function courtDate(v: LetterVars): string {
@@ -557,7 +550,7 @@ function courtDate(v: LetterVars): string {
 // thing. One sentence of "you don't want the trip, you don't want the
 // record, call today and the paperwork starts" tuned to each situation.
 export function letterPs(type: LetterType, v: LetterVars): string {
-  const state = esc(v.stateName ?? "Arkansas");
+  const state = v.stateName ?? "Arkansas";
   switch (type) {
     case "intro":
     case "second_chase":
@@ -579,24 +572,44 @@ export function letterPs(type: LetterType, v: LetterVars): string {
 // PostGrid's renderer can fetch it (public/letterhead.png in the repo).
 export const LETTERHEAD_URL = "https://tvchub-f2401.web.app/letterhead.png";
 
-// Full letter HTML: the firm's letterhead image centered at the top, then
-// date, salutation, body, signature, and the advertising-compliance footer.
-// Page geometry is fixed at US Letter (8.5×11") with 1-inch margins via
-// @page; body paragraphs carry a half-inch first-line indent (see para()).
+// Full letter HTML from editable text: the firm's letterhead image centered
+// at the top, then date, salutation, the text's paragraphs (P.S. paragraphs
+// held for below the signature), signature block, and the advertising-
+// compliance footer. Page geometry is fixed at US Letter (8.5×11").
 // The recipient address rides on PostGrid's separate address page
 // (addressPlacement insert_blank_page), so page one belongs entirely to
 // the letterhead design.
-export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: string): string {
-  const body = letterBody(type, v);
+export function renderLetterFromText(
+  text: string,
+  type: LetterType,
+  v: LetterVars,
+  todayHuman: string,
+): string {
+  const blocks = text
+    .split(/\n\s*\n/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+  const bodyParts: string[] = [];
+  const psParts: string[] = [];
+  for (const b of blocks) {
+    if (b === COURT_DATE_BOX_TOKEN) {
+      if (v.courtDate) bodyParts.push(keepThisBox(v, boxHeading(type)));
+      continue;
+    }
+    if (/^(\*\*)?P\.S\./.test(b)) {
+      psParts.push(`<p style="margin:12px 0 0 0;"><b>${mdInline(b.replace(/\*\*/g, ""))}</b></p>`);
+      continue;
+    }
+    bodyParts.push(para(mdInline(b)));
+  }
   // Geometry: the hard @page margin is 0.5in (PostGrid clips anything
   // outside it), and the text column is padded a further 0.5in — so the
   // LETTER reads with true 1-inch margins while the letterhead alone may
   // reach into the extra half inch on each side. At 7in the letterhead
   // runs a quarter inch past the text column on each side (6.5in was too
   // small, the full 7.48in too big) — clip-safe inside the 7.5in zone.
-  // The signature block's left edge sits 4in from the page's left edge
-  // (0.5 page + 0.5 padding + 3in offset). Serif comes from an embedded
-  // web font (PT Serif) because PostGrid's renderer has no local Georgia.
+  // Serif comes from an embedded web font (PT Serif) because PostGrid's
+  // renderer has no local Georgia.
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   @import url('https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400;1,700&display=swap');
@@ -609,13 +622,12 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
        style="display:block; width:7in; margin:0 -0.25in 16px -0.25in;">
   <p style="margin:0 0 10px 0; text-align:center; font-weight:bold;">${esc(todayHuman)}</p>
   <p style="margin:0 0 10px 0;">Warm hello ${esc(titleCaseName(v.name))},</p>
-  ${referralLine(v)}
-  ${body}
+  ${bodyParts.join("\n  ")}
   <div style="margin:14px 0 0 3.75in; white-space:nowrap;">
     <p style="margin:0 0 2px 0;">Sincerely,</p>
     <p style="margin:0;"><b>${FIRM.signer}</b><br>${FIRM.signerTitle}, ${FIRM.name}<br><b>${FIRM.phone}</b></p>
   </div>
-  <p style="margin:12px 0 0 0;"><b>${letterPs(type, v)}</b></p>
+  ${psParts.join("\n  ")}
   <div style="margin-top: 14px; border-top: 1px solid #999; padding-top: 6px; font-size: 9px; color: #555;">
     ADVERTISING MATERIAL. This letter is a communication from a law firm and is not legal advice.
     No attorney&ndash;client relationship exists between you and ${FIRM.name} unless and until you
@@ -626,16 +638,30 @@ export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: st
 </body></html>`;
 }
 
-// Plain-text preview for the Mail Room card (no HTML soup in the UI).
+// The stock letter for a type, rendered through the same text pipeline the
+// Mail Room edits — so stock and edited letters can never drift apart.
+export function renderLetterHtml(type: LetterType, v: LetterVars, todayHuman: string): string {
+  return renderLetterFromText(letterEditableText(type, v), type, v, todayHuman);
+}
+
+// Plain-text preview of editable text for the Mail Room card (markers
+// stripped, box token spelled out).
+export function previewFromEditable(text: string, type: LetterType, v: LetterVars): string {
+  return text
+    .split(/\n\s*\n/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map((b) =>
+      b === COURT_DATE_BOX_TOKEN
+        ? v.courtDate
+          ? `${boxHeading(type)}: ${courtLine(v)}`
+          : ""
+        : b.replace(/\*\*/g, ""),
+    )
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 export function letterPreviewText(type: LetterType, v: LetterVars): string {
-  return (referralLine(v) + letterBody(type, v) + `<p>${letterPs(type, v)}</p>`)
-    .replace(/<div[^>]*>/g, "\n")
-    .replace(/<p[^>]*>/g, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{2,}/g, "\n\n")
-    .trim();
+  return previewFromEditable(letterEditableText(type, v), type, v);
 }

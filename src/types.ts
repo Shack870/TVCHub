@@ -348,6 +348,9 @@ export interface Letter {
   status: LetterStatus;
   reason: string; // why the sweep proposed it
   preview: string; // plain-text body preview
+  // The editable letter text (light markdown: **bold**, [[COURT DATE BOX]]).
+  // Approval renders and mails exactly this. Older letters may lack it.
+  bodyText?: string | null;
   to: { line1: string; city: string; provinceOrState: string; postalOrZip: string };
   blockedReason?: string | null;
   proposedAt: number;

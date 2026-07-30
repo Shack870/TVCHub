@@ -14,6 +14,10 @@ import type { Letter } from '../types';
 // the lead's live state server-side, so a letter whose moment has passed
 // (retained an hour ago, court date moved) bounces with the reason instead
 // of mailing.
+//
+// Each card can also PREVIEW the final rendered page (the server renders it
+// with the exact same code approval uses) and EDIT the letter's text —
+// saved edits are what physically mails.
 
 type Tab = 'proposed' | 'sent' | 'history';
 
@@ -27,11 +31,21 @@ const TYPE_TONE: Record<Letter['type'], string> = {
   intro: 'bg-amber-600/15 text-amber-800',
 };
 
+interface PreviewState {
+  letter: Letter;
+  html: string;
+}
+
 export function MailRoom() {
   const letters = useLetters();
   const selectLead = useUI((s) => s.selectLead);
   const [tab, setTab] = useState<Tab>('proposed');
   const [busy, setBusy] = useState<string | null>(null);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [previewing, setPreviewing] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const { proposed, sent, history } = useMemo(() => {
     const proposed = letters.filter((l) => l.status === 'proposed');
@@ -60,6 +74,61 @@ export function MailRoom() {
       notify.error(e instanceof Error ? e.message : 'Could not update the letter.');
     } finally {
       setBusy(null);
+    }
+  };
+
+  // Renders the final page server-side (same renderer approval uses).
+  // Pass bodyText to preview unsaved edits.
+  const openPreview = async (letter: Letter, bodyText?: string) => {
+    if (previewing) return;
+    setPreviewing(letter.id);
+    try {
+      const fn = httpsCallable(functions, 'previewLetter');
+      const res = await fn({ letterId: letter.id, ...(bodyText != null ? { bodyText } : {}) });
+      const data = res.data as { ok: boolean; html: string; bodyText: string };
+      setPreview({ letter, html: data.html });
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Could not build the preview.');
+    } finally {
+      setPreviewing(null);
+    }
+  };
+
+  const startEdit = async (letter: Letter) => {
+    if (letter.bodyText) {
+      setEditingId(letter.id);
+      setDraft(letter.bodyText);
+      return;
+    }
+    // Letters proposed before the edit feature lack bodyText — the preview
+    // callable returns the server-generated editable text.
+    setPreviewing(letter.id);
+    try {
+      const fn = httpsCallable(functions, 'previewLetter');
+      const res = await fn({ letterId: letter.id });
+      const data = res.data as { ok: boolean; html: string; bodyText: string };
+      setEditingId(letter.id);
+      setDraft(data.bodyText);
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Could not load the letter text.');
+    } finally {
+      setPreviewing(null);
+    }
+  };
+
+  const saveAndPreview = async (letter: Letter) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const fn = httpsCallable(functions, 'saveLetterText');
+      await fn({ letterId: letter.id, bodyText: draft });
+      notify.success('Letter text saved — this is what will mail.');
+      setEditingId(null);
+      await openPreview(letter, draft);
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Could not save the letter text.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -126,7 +195,40 @@ export function MailRoom() {
                 Why: {l.reason}
               </p>
 
-              <LetterBody preview={l.preview} />
+              {editingId === l.id ? (
+                <div className="mt-2">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    rows={14}
+                    className="w-full rounded-md border border-pad-ink/20 bg-white/70 p-2 font-type text-xs leading-relaxed text-pad-ink focus:outline-none focus:ring-1 focus:ring-emerald-700"
+                  />
+                  <p className="mt-1 font-type text-[10px] text-pad-inkSoft/70">
+                    Blank line = new paragraph · **text** prints bold · a paragraph starting with
+                    "P.S." prints below the signature · keep the [[COURT DATE BOX]] line where the
+                    boxed court date should sit. Date, greeting, signature, and the legal footer are
+                    automatic.
+                  </p>
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button
+                      disabled={saving}
+                      onClick={() => setEditingId(null)}
+                      className="rounded-md border border-pad-ink/20 px-3 py-1.5 font-type text-xs font-semibold text-pad-inkSoft transition hover:bg-black/10 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      disabled={saving}
+                      onClick={() => void saveAndPreview(l)}
+                      className="rounded-md bg-pad-ink px-3 py-1.5 font-type text-xs font-bold text-manila transition hover:bg-pad-ink/80 disabled:opacity-50"
+                    >
+                      {saving ? 'Saving…' : 'Save & Preview'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <LetterBody preview={l.preview} />
+              )}
 
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                 <span className="font-type text-[11px] text-pad-inkSoft/60">
@@ -137,7 +239,7 @@ export function MailRoom() {
                   {l.status === 'skipped' && `skipped by ${l.decidedBy ?? '—'}`}
                   {l.status === 'blocked' && `blocked — ${l.blockedReason ?? 'no longer eligible'}`}
                 </span>
-                <span className="flex items-center gap-2">
+                <span className="flex flex-wrap items-center justify-end gap-2">
                   {l.testMode && (
                     <span className="rounded-full bg-sky-600/15 px-2 py-0.5 font-type text-[10px] font-bold uppercase text-sky-800">
                       test mode
@@ -148,8 +250,37 @@ export function MailRoom() {
                       delivered
                     </span>
                   )}
+                  {l.status !== 'proposed' && l.previewUrl && (
+                    <a
+                      href={l.previewUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-md border border-pad-ink/20 px-3 py-1.5 font-type text-xs font-semibold text-pad-inkSoft transition hover:bg-black/10"
+                      title="The PDF PostGrid printed and mailed"
+                    >
+                      View PDF
+                    </a>
+                  )}
                   {l.status === 'proposed' && (
                     <>
+                      <button
+                        disabled={previewing === l.id}
+                        onClick={() => void openPreview(l, editingId === l.id ? draft : undefined)}
+                        title="See the final printed page, exactly as it will mail"
+                        className="rounded-md border border-pad-ink/20 px-3 py-1.5 font-type text-xs font-semibold text-pad-inkSoft transition hover:bg-black/10 disabled:opacity-50"
+                      >
+                        {previewing === l.id ? 'Rendering…' : 'Preview Letter'}
+                      </button>
+                      {editingId !== l.id && (
+                        <button
+                          disabled={previewing === l.id}
+                          onClick={() => void startEdit(l)}
+                          title="Change the letter's wording before it mails"
+                          className="rounded-md border border-pad-ink/20 px-3 py-1.5 font-type text-xs font-semibold text-pad-inkSoft transition hover:bg-black/10 disabled:opacity-50"
+                        >
+                          Edit Text
+                        </button>
+                      )}
                       <button
                         disabled={busy === l.id}
                         onClick={() => void decide(l, 'skip')}
@@ -170,6 +301,42 @@ export function MailRoom() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {preview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setPreview(null)}
+        >
+          <div
+            className="flex max-h-full flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-black/10 px-4 py-2">
+              <p className="font-type text-sm font-bold text-pad-ink">
+                {preview.letter.label} — {preview.letter.leadName}
+              </p>
+              <button
+                onClick={() => setPreview(null)}
+                className="rounded-md px-2 py-1 font-type text-xs font-semibold text-pad-inkSoft hover:bg-black/10"
+              >
+                ✕ Close
+              </button>
+            </div>
+            {/* The white frame stands in for the printer's 0.5in page margin;
+                the letter HTML carries its own inner padding. */}
+            <div className="overflow-auto bg-neutral-300 p-4">
+              <div className="mx-auto bg-white p-[0.5in] shadow-lg" style={{ width: 'min(88vw, 816px)' }}>
+                <iframe
+                  srcDoc={preview.html}
+                  title="Letter preview"
+                  sandbox=""
+                  className="h-[75vh] w-full border-0 bg-white"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

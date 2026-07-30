@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  COURT_DATE_BOX_TOKEN,
   leadMailFacts,
   letterBlockReason,
+  letterEditableText,
   letterPreviewText,
   lostReasonIsResolved,
   parseMailAddress,
   proposeLetter,
+  renderLetterFromText,
   renderLetterHtml,
   titleCaseName,
   type LetterHistoryFacts,
@@ -282,6 +285,45 @@ describe("rendering", () => {
     const html = renderLetterHtml("court_passed", { name: "X Y", stateName: "Arkansas" }, "Jul 30");
     expect(html).toMatch(/may have issued/);
     expect(html).not.toMatch(/warrant (was|has been) issued/i);
+  });
+
+  it("editable text round-trips: box token where the box belongs, markers render bold", () => {
+    const vars = {
+      name: "MARKO WACIBA",
+      courtDate: "Monday, August 24, 2026",
+      stateName: "Arkansas",
+    };
+    const introText = letterEditableText("intro", vars);
+    expect(introText).toContain(COURT_DATE_BOX_TOKEN);
+    expect(introText).toContain("**TVC Pro-Driver**");
+    // Thinking letter deliberately has no box (runs past one page with it).
+    expect(letterEditableText("thinking", vars)).not.toContain(COURT_DATE_BOX_TOKEN);
+    // The stock render IS the rendered editable text.
+    expect(renderLetterHtml("intro", vars, "Jul 30")).toBe(
+      renderLetterFromText(introText, "intro", vars, "Jul 30"),
+    );
+  });
+
+  it("renders reviewer-edited text: custom words, bold, P.S. below signature, box honored", () => {
+    const vars = { name: "X Y", courtDate: "Monday, August 24, 2026", stateName: "Arkansas" };
+    const edited = [
+      "Totally custom opener with a **bold promise**.",
+      COURT_DATE_BOX_TOKEN,
+      "P.S. Custom postscript.",
+    ].join("\n\n");
+    const html = renderLetterFromText(edited, "intro", vars, "Jul 30");
+    expect(html).toContain("Totally custom opener with a <b>bold promise</b>.");
+    expect(html).toContain("border:3px solid"); // the box rendered
+    // The P.S. sits after the signature block.
+    expect(html.indexOf("Custom postscript")).toBeGreaterThan(html.indexOf("Sincerely,"));
+    // Deleting the box token removes the box entirely.
+    expect(renderLetterFromText("Just words.", "intro", vars, "Jul 30")).not.toContain(
+      "border:3px solid",
+    );
+    // HTML in edited text is escaped, never injected.
+    expect(renderLetterFromText("<script>alert(1)</script>", "intro", vars, "Jul 30")).not.toContain(
+      "<script>",
+    );
   });
 
   it("free reminders shout that we are NOT retained; pitch letters don't", () => {

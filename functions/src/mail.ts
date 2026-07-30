@@ -9,10 +9,12 @@ import {
   FIRM_CONTACT,
   LETTER_LABEL,
   letterBlockReason,
+  letterEditableText,
   letterPreviewText,
   parseMailAddress,
+  previewFromEditable,
   proposeLetter,
-  renderLetterHtml,
+  renderLetterFromText,
   titleCaseName,
   type LetterType,
   type LetterVars,
@@ -210,6 +212,7 @@ export const mailSweep = onSchedule(
         fullKey,
         to: addr,
         vars,
+        bodyText: letterEditableText(proposal.type, vars),
         preview: letterPreviewText(proposal.type, vars),
         courtDateAtProposal: (d.nextCourtDate as string) ?? null,
         proposedAt: now,
@@ -329,7 +332,10 @@ export const decideLetter = onCall(
 
     const addr = parseMailAddress(lead.address)!;
     const vars = L.vars as LetterVars;
-    const html = renderLetterHtml(type, vars, humanDate(chicagoDayISO(now)));
+    // The letter's editable text is what mails — reviewer edits included.
+    // Letters proposed before the edit feature lack bodyText; regenerate.
+    const bodyText = str(L.bodyText) || letterEditableText(type, vars);
+    const html = renderLetterFromText(bodyText, type, vars, humanDate(chicagoDayISO(now)));
     let pg: Dict;
     try {
       pg = await pgFetch(apiKey, "/letters", {
@@ -394,3 +400,60 @@ export const decideLetter = onCall(
     return { ok: true, status: "sent", testMode, previewUrl: str(pg.url) || null };
   },
 );
+
+// ---------- Preview / edit ----------
+
+const MAX_BODY_TEXT = 20_000;
+
+// Renders a letter's final HTML for the Mail Room's preview modal — the
+// exact same renderer approval uses, so the preview IS the letter. An
+// optional bodyText lets the UI preview unsaved edits.
+export const previewLetter = onCall({ timeoutSeconds: 30 }, async (req) => {
+  if (!req.auth) throw new HttpsError("unauthenticated", "Sign in required.");
+  const letterId = str(req.data?.letterId).trim();
+  if (!letterId) throw new HttpsError("invalid-argument", "letterId is required.");
+  const override = req.data?.bodyText != null ? str(req.data.bodyText) : null;
+  if (override && override.length > MAX_BODY_TEXT) {
+    throw new HttpsError("invalid-argument", "Letter text is too long.");
+  }
+
+  const snap = await getFirestore().collection("letters").doc(letterId).get();
+  if (!snap.exists) throw new HttpsError("not-found", "Letter not found.");
+  const L = snap.data() as Dict;
+  const type = L.type as LetterType;
+  const vars = L.vars as LetterVars;
+  const bodyText = override ?? (str(L.bodyText) || letterEditableText(type, vars));
+  const html = renderLetterFromText(bodyText, type, vars, humanDate(chicagoDayISO(Date.now())));
+  return { ok: true, html, bodyText };
+});
+
+// Saves reviewer edits to a proposed letter's text. Approval renders from
+// this text, so a saved edit is exactly what mails.
+export const saveLetterText = onCall({ timeoutSeconds: 30 }, async (req) => {
+  if (!req.auth) throw new HttpsError("unauthenticated", "Sign in required.");
+  const letterId = str(req.data?.letterId).trim();
+  const bodyText = str(req.data?.bodyText).trim();
+  if (!letterId) throw new HttpsError("invalid-argument", "letterId is required.");
+  if (!bodyText) throw new HttpsError("invalid-argument", "The letter text cannot be empty.");
+  if (bodyText.length > MAX_BODY_TEXT) {
+    throw new HttpsError("invalid-argument", "Letter text is too long.");
+  }
+
+  const ref = getFirestore().collection("letters").doc(letterId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Letter not found.");
+  const L = snap.data() as Dict;
+  if (L.status !== "proposed") {
+    throw new HttpsError("failed-precondition", `Letter is already ${str(L.status)} — text is locked.`);
+  }
+
+  const now = Date.now();
+  await ref.update({
+    bodyText,
+    preview: previewFromEditable(bodyText, L.type as LetterType, L.vars as LetterVars),
+    editedBy: req.auth.token.email ?? req.auth.uid,
+    editedAt: now,
+    updatedAt: now,
+  });
+  return { ok: true };
+});
