@@ -255,7 +255,8 @@ describe("rendering", () => {
       expect(html).toContain("870-399-1440");
       expect(html).toContain("Warm hello Marko Waciba");
       // Every letter names the referral source and their TVC number.
-      expect(html).toContain("TVC Pro Driver");
+      expect(html).toContain("TVC Pro-Driver");
+      expect(html).not.toContain("Truckers Voice");
       expect(html).toContain("#1565395");
       // The design contract: letterhead image (15% wider than the text
       // column), US Letter with 1in margins, half-inch first-line indents,

@@ -425,7 +425,7 @@ function para(text: string): string {
 function referralLine(v: LetterVars): string {
   const state = v.stateName ?? "Arkansas";
   return para(
-    `We received your referral from <b>TVC Pro Driver</b> (Truckers Voice in Court), which is how your ${esc(state)} traffic case reached our firm.${
+    `We received your referral from <b>TVC Pro-Driver</b>, which is how your ${esc(state)} traffic case reached our firm.${
       v.tvcNumber ? ` Your TVC number is <b>#${esc(v.tvcNumber)}</b>.` : ""
     }`,
   );
@@ -478,18 +478,24 @@ function letterBody(type: LetterType, v: LetterVars): string {
       ].join("");
     case "thinking":
       return [
-        para(`It was good to speak with you about your traffic case in ${esc(state)}. You wanted some time to think it over — that's fair, and this letter is here when you're ready.`),
         para(
-          `Here is what hiring us gets you: we ask the court to excuse your personal appearance, so you don't travel. We work to get the ticket dismissed, negotiated down, or beaten at trial. Your driving record — and your livelihood — stays protected.`,
+          `It was good speaking with you about your ${esc(state)} traffic case. You wanted a little time to think it over — that's completely understandable. This letter will be here when you're ready.`,
+        ),
+        para(
+          `One important benefit of hiring us now is that we can ask the Court for a Motion for Continuance, which often allows you to avoid making the drive to your scheduled court date while we begin working on your case. The earlier we are hired, the more likely we are to have time to request that relief before your appearance is required.`,
+        ),
+        para(
+          `From there, we handle the case for you. We work to have the ticket dismissed, negotiated to a lesser offense, or defended at trial if necessary — all with the goal of protecting your driving record, your insurance rates, and your livelihood.`,
         ),
         v.courtDate
           ? para(
               court +
-                ` The sooner we start, the more options we have. Filing deadlines come well before the court date itself.`,
+                ` The sooner we get started, the more options we have, because important filing deadlines occur well before the court date itself.`,
             )
           : "",
+        // No keep-this box here: the copy already carries the bold court date,
+        // and with it the letter runs past one page.
         para(`Call <b>${FIRM.phone}</b> and we can have your defense started the same day.`),
-        v.courtDate ? keepThisBox(v, "KEEP THIS — YOUR COURT DATE") : "",
       ].join("");
     case "motions":
       return [
